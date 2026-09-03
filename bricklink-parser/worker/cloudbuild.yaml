@@ -1,0 +1,63 @@
+# Cloud Build: build Playwright refresh worker and deploy to Cloud Run.
+# Trigger:
+#   gcloud builds submit --config=scripts/bricklink-parser/worker/cloudbuild.yaml \
+#     --project=brickinfuture-306f1 \
+#     --substitutions=_REFRESH_WORKER_TOKEN=SECRET
+#
+# Substitutions:
+#   _REGION, _SERVICE, _REFRESH_WORKER_TOKEN
+
+substitutions:
+  _REGION: europe-west1
+  _SERVICE: bricklink-refresh
+  _REFRESH_WORKER_TOKEN: ""
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/bif/${_SERVICE}:$BUILD_ID
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/bif/${_SERVICE}:latest
+      - -f
+      - scripts/bricklink-parser/worker/Dockerfile
+      - .
+
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/bif/${_SERVICE}:$BUILD_ID
+
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/bif/${_SERVICE}:latest
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/bif/${_SERVICE}:$BUILD_ID
+      - --region=${_REGION}
+      - --platform=managed
+      - --memory=2Gi
+      - --cpu=1
+      - --timeout=300
+      - --concurrency=1
+      - --min-instances=1
+      - --max-instances=10
+      - --no-cpu-throttling
+      - --allow-unauthenticated
+      - --service-account=firebase-adminsdk-fbsvc@$PROJECT_ID.iam.gserviceaccount.com
+      - --set-env-vars=DEV_PROJECT_ID=$PROJECT_ID,REFRESH_WORKER_TOKEN=${_REFRESH_WORKER_TOKEN},BL_PARSE_TIMEOUT_MS=90000
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/bif/${_SERVICE}:$BUILD_ID
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/bif/${_SERVICE}:latest
+
+timeout: 1800s
+options:
+  logging: CLOUD_LOGGING_ONLY

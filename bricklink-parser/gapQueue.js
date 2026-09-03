@@ -1,0 +1,193 @@
+/**
+ * Очередь задач из ledger-дыр (набор × месяц).
+ * Канон: BIF_parser.md § Ledger.
+ *
+ * Один HTML-скрейп BrickLink пишет **все** помесячные sold-блоки со страницы
+ * (не только последние 6 месяцев — на старых наборах бывают годы истории).
+ */
+"use strict";
+
+const { observationDocId } = require("./catalogFields");
+const {
+  classifyCoverage,
+  resolveCatalogCoverage,
+  LAUNCH_MIN_AGE_MS,
+  NOVELTY_MAX_AGE_MS,
+} = require("./coveragePolicy");
+const {
+  classifyPeriodSlot,
+  periodIdsBetween,
+  expectedPeriodIdsForItem,
+  lastClosedUtcYearMonth,
+  utcYearMonth,
+} = require("./gapLedger");
+const { LEDGER_STATUS } = require("./marketPoint");
+const { scoreCatalogPriority } = require("./catalogPriority");
+
+function periodsToCheckForGaps(cat, currentPeriodId, nowMs = Date.now()) {
+  const classif = classifyCoverage(cat, nowMs);
+  const out = new Set();
+
+  // Все ожидаемые месяцы набора (launch+2d → сейчас) — HTML может закрыть старые дыры.
+  for (const pid of expectedPeriodIdsForItem(
+    { launchDateMs: classif.launchMs },
+    nowMs
+  )) {
+    out.add(pid);
+  }
+
+  if (classif.cohort === "novelty" && classif.launchMs != null) {
+    const scrapeStart = classif.launchMs + LAUNCH_MIN_AGE_MS;
+    const scrapeEnd = Math.min(nowMs, classif.launchMs + NOVELTY_MAX_AGE_MS);
+    for (const pid of periodIdsBetween(scrapeStart, scrapeEnd, { maxMonths: 14 })) {
+      out.add(pid);
+    }
+  }
+
+  if (currentPeriodId) out.add(currentPeriodId);
+  out.add(utcYearMonth(new Date(nowMs)));
+
+  return [...out];
+}
+
+async function loadMonthlyByPeriod(db, obsId, periodIds) {
+  const map = new Map();
+  if (!periodIds.length) return map;
+  const col = db.collection("market_observations").doc(obsId).collection("monthly");
+  const refs = periodIds.map((pid) => col.doc(pid));
+  const snaps = await db.getAll(...refs);
+  for (const snap of snaps) {
+    if (snap.exists) map.set(snap.id, snap.data() || {});
+  }
+  return map;
+}
+
+async function findGapSlotsForItem(db, cat, currentPeriodId, nowMs = Date.now()) {
+  const obsId = observationDocId(cat.catalogItemId, "bricklink");
+  const check = periodsToCheckForGaps(cat, currentPeriodId, nowMs);
+  const monthlyMap = await loadMonthlyByPeriod(db, obsId, check);
+  return check.map((periodId) =>
+    classifyPeriodSlot(periodId, monthlyMap.get(periodId) || null)
+  );
+}
+
+/** Есть ли месяцы, которые HTML BrickLink может закрыть (≤ текущий UTC). */
+function hasBlFillableGap(slots, nowMs = Date.now()) {
+  const currentUtc = utcYearMonth(new Date(nowMs));
+  return (slots || []).some(
+    (s) => s.status === LEDGER_STATUS.GAP && s.periodId <= currentUtc
+  );
+}
+
+/**
+ * Coverage говорит skip (mature_fresh_6mo), но ledger всё ещё с дырами — скрейпим.
+ * Gap-очередь уже отфильтровала такие наборы; cursor-путь проверяет ledger отдельно.
+ */
+function scrapeDespiteCoverageSkip(source, coverage, slots, nowMs = Date.now()) {
+  if (!coverage || !coverage.skip) return false;
+  if (String(source || "") === "gap") return true;
+  return hasBlFillableGap(slots, nowMs);
+}
+
+function scoreGapTask(cat, slots, currentPeriodId, coverage, nowMs = Date.now()) {
+  let score = scoreCatalogPriority(cat, coverage || { skip: false });
+  const gaps = slots.filter((s) => s.status === LEDGER_STATUS.GAP);
+  const currentUtc = utcYearMonth(new Date(nowMs));
+  const lastClosed = lastClosedUtcYearMonth(new Date(nowMs));
+  const currentUtcGap = gaps.some((g) => g.periodId === currentUtc);
+  const recentClosedGap = gaps.some((g) => g.periodId === lastClosed);
+  const currentGap = gaps.some((g) => g.periodId === currentPeriodId);
+  if (currentUtcGap) score += 2200;
+  else if (recentClosedGap) score += 2000;
+  else if (currentGap) score += 1200;
+  score += Math.min(gaps.length, 12) * 80;
+  if (coverage && !coverage.skip && coverage.reason === "novelty_need_month") score += 500;
+  if (coverage && !coverage.skip && coverage.reason === "mature_stale") score += 300;
+  return score;
+}
+
+async function fetchGapQueue(db, admin, opts) {
+  const types = (opts.types || ["SET", "MINIFIG"]).map((t) => String(t).toUpperCase());
+  const maxTasks = Math.max(1, Number(opts.maxTasks) || 80);
+  const maxScan = Math.max(maxTasks, Number(opts.maxScan) || maxTasks * 25);
+  const currentPeriodId = opts.currentPeriodId;
+  const mapCatalogDoc = opts.mapCatalogDoc;
+  const shardIndex = Number(opts.shardIndex) || 0;
+  const shardCount = Math.max(1, Number(opts.shardCount) || 1);
+  const excludeIds = opts.excludeIds || null;
+  const nowMs = Date.now();
+
+  const candidates = [];
+  let scanned = 0;
+
+  function shardOk(catalogItemId) {
+    if (shardCount <= 1) return true;
+    const s = String(catalogItemId || "");
+    let h = 0;
+    for (let i = 0; i < s.length; i += 1) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+    return h % shardCount === shardIndex;
+  }
+
+  for (const itemType of types) {
+    let lastId = null;
+    while (candidates.length < maxTasks * 3 && scanned < maxScan) {
+      let q = db
+        .collection("catalog_items")
+        .where("itemType", "==", itemType)
+        .orderBy(admin.firestore.FieldPath.documentId())
+        .limit(120);
+      if (lastId) q = q.startAfter(lastId);
+      const snap = await q.get();
+      if (snap.empty) break;
+
+      for (const doc of snap.docs) {
+        scanned += 1;
+        if (scanned > maxScan) break;
+        if (!shardOk(doc.id)) continue;
+        if (excludeIds && excludeIds.has(doc.id)) continue;
+
+        const cat = mapCatalogDoc(doc);
+        if (!cat.itemNumber || !cat.supportedBlType || cat.mistypedGear) continue;
+
+        const slots = await findGapSlotsForItem(db, cat, currentPeriodId, nowMs);
+        const gaps = slots.filter((s) => s.status === LEDGER_STATUS.GAP);
+        const blFillableGap = hasBlFillableGap(slots, nowMs);
+
+        let coverage;
+        if (blFillableGap) {
+          coverage = { skip: false, reason: "ledger_gap", cohort: "mature" };
+        } else {
+          coverage = await resolveCatalogCoverage(db, cat, currentPeriodId, { nowMs });
+          if (coverage.skip) continue;
+        }
+
+        candidates.push({
+          cat: { ...cat, _coverage: coverage },
+          targetPeriodId: utcYearMonth(new Date(nowMs)),
+          score: scoreGapTask(cat, slots, currentPeriodId, coverage, nowMs),
+          gapCount: gaps.length,
+          currentMonthGap: blFillableGap,
+          coverage,
+          gapPeriods: gaps.map((g) => g.periodId),
+        });
+      }
+
+      lastId = snap.docs[snap.docs.length - 1].id;
+      if (snap.size < 120) break;
+    }
+  }
+
+  candidates.sort(
+    (a, b) => b.score - a.score || a.cat.catalogItemId.localeCompare(b.cat.catalogItemId)
+  );
+  return candidates.slice(0, maxTasks);
+}
+
+module.exports = {
+  periodsToCheckForGaps,
+  findGapSlotsForItem,
+  hasBlFillableGap,
+  scrapeDespiteCoverageSkip,
+  scoreGapTask,
+  fetchGapQueue,
+};
