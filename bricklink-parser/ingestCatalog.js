@@ -806,6 +806,7 @@ async function main() {
           skipped += 1;
           processed += 1;
           console.log(`SKIP ${cat.catalogItemId} (unsupported itemType ${cat.itemType})`);
+          if (source === "gap") gapHandled.add(cat.catalogItemId);
           continue;
         }
 
@@ -813,6 +814,7 @@ async function main() {
           skipped += 1;
           processed += 1;
           console.log(`SKIP ${setNo} (mistyped Gear as SET — ${cat.catalogItemId})`);
+          if (source === "gap") gapHandled.add(cat.catalogItemId);
           continue;
         }
 
@@ -839,6 +841,7 @@ async function main() {
           skipped += 1;
           processed += 1;
           console.log(`SKIP ${setNo} (already ok ${periodId})`);
+          if (source === "gap") gapHandled.add(cat.catalogItemId);
           continue;
         }
 
@@ -847,6 +850,7 @@ async function main() {
           processed += 1;
           const skipReason = cat.blFetch.reason || "skip_no_bl_item";
           console.log(`SKIP ${setNo} (${skipReason} — ${cat.catalogItemId})`);
+          if (source === "gap") gapHandled.add(cat.catalogItemId);
           if (CONFIRM) {
             await writeObservationFromParse(
               db,
@@ -870,12 +874,15 @@ async function main() {
           skipped += 1;
           processed += 1;
           console.log(`SKIP ${setNo} (cluster jump ${skipBaseKey})`);
+          if (source === "gap") gapHandled.add(cat.catalogItemId);
           continue;
         }
 
         if (CONFIRM && (await recentlySoftBlocked(db, cat.catalogItemId))) {
           skipped += 1;
           processed += 1;
+          // Иначе очередь дыр снова подсовывает тот же набор по кругу.
+          if (source === "gap") gapHandled.add(cat.catalogItemId);
           console.log(`SKIP ${setNo} (soft_blocked <24h)`);
           continue;
         }
@@ -934,6 +941,7 @@ async function main() {
             );
           }
           await saveCheckpoint();
+          if (source === "gap") gapHandled.add(cat.catalogItemId);
           if (isSoftBlockTag("exception", lastError)) {
             const cluster = applyClusterAfterSoft(cat);
             if (cluster?.needsCursorJump) await jumpCursorPastHotZone("mixed_soft_exception");
@@ -966,6 +974,7 @@ async function main() {
             );
           }
           await saveCheckpoint();
+          if (source === "gap") gapHandled.add(cat.catalogItemId);
           if (isSoftBlockTag(scrape.errorTag, lastError)) {
             const cluster = applyClusterAfterSoft(cat);
             if (cluster?.needsCursorJump) await jumpCursorPastHotZone("mixed_soft_block");
