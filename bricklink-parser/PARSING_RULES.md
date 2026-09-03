@@ -2,7 +2,7 @@
 
 Канон для bulk ingest, GHA и локальных догонов. Код: `coveragePolicy.js`, `ingestCatalog.js`, `writeRawObservation.js` + `observationWriter.js` (BIF — закрыто: `functions/bifFromObservation.js`).
 
-**Источник сейчас:** BrickLink HTML Price Guide — сводка + **все** помесячные sold-блоки на странице (не только последние 6 месяцев).  
+**Источник сейчас:** BrickLink HTML Price Guide — сводка + **все** помесячные sold-блоки на странице (не только последние 6 месяцев). Если сводка есть, а помесячных заголовков нет — всё равно **ok** (пишем сводку).  
 Публично в UI — только **BIF** (не сырые avg гида).
 
 ---
@@ -15,10 +15,10 @@
 | **Новинка** | launch **+2 дня … +365 дней** | **1 точка на календарный месяц** (ok или bootstrap) |
 | **Зрелый** | возраст ≥ 1 год **или** нет launch | только если нет рыночного **ok** старше **~6 месяцев** (180 суток) |
 
-Типы в GHA-окне: **только SET + MINIFIG** (экономия минут).  
-BOX / INSTRUCTION / GEAR — **локально руками** после 15-го или отдельным `--phase=secondary`.
+Типы в GHA-окне: **только SET + MINIFIG**.  
+BOX / INSTRUCTION / GEAR — **локально руками** после 26-го или `--phase=secondary`. Не цель «100 тыс. попыток».
 
-Порядок в батче: **сначала новинки и популярные темы** (`catalogPriority.js`), затем SET ↔ MINIFIG по курсору. В конце слота — короткий `retry-errors`.
+Порядок в батче: **сначала новинки и популярные темы** (`catalogPriority.js`), затем SET ↔ MINIFIG по курсору. В конце слота — короткий `retry-errors` (не свежий Oops).
 
 ---
 
@@ -29,34 +29,34 @@ BOX / INSTRUCTION / GEAR — **локально руками** после 15-г�
 
 ---
 
-## Календарь исполнения (минуты GHA)
+## Календарь исполнения
 
 | Дни месяца | Канал | Что |
 |------------|--------|-----|
-| **1–26** | **GitHub Actions по cron** (с **сентября 2026**) | primary SET+MINIFIG, HTTP token, limit 600 |
+| **1–26** | **публичный** `BIF_Parser` по cron | primary SET+MINIFIG, HTTP token, limit 1200, 80 мин |
 | **27–конец** | **Локально руками** (при необходимости) | добить дыры / secondary |
-| **всегда** | Pro refresh (кнопка) / `workflow_dispatch` | полный качественный скрейп |
+| **всегда** | Pro refresh (кнопка на сайте) | полный скрейп; очередь в привате — **только dispatch** |
 
 **Доставка:** Playwright один раз → WAF-токен → дальше HTTP fetch (`http_token_catalogPG`).
 
-Лимит Free ≈ **2000 мин/мес**. При **78 окнах** × ~45–55 мин ≈ **3.5–4.5k мин** — **выше free**; нужен платный GHA или укоротить `maxMinutes`.
+Минуты GitHub на публичном репо **безлимитные**. Закрытый репо **не** гоняет bulk по расписанию.
 
-### Старт в сентябре
+### Ручной пинок (публичный)
 
 ```bash
-gh workflow run "BrickLink ingest" --ref main
-gh run list --workflow "BrickLink ingest" --limit 5
+gh workflow run "BrickLink parser (public, raw-only)" --repo BrickInFuture/BIF_Parser
+gh run list --repo BrickInFuture/BIF_Parser --limit 5
 ```
 
-Нужен секрет `FIREBASE_SERVICE_ACCOUNT_DEV`. Proxy опционален (HTTP-путь на GHA работает без).
+Нужен секрет `FIREBASE_SERVICE_ACCOUNT_DEV` в **BIF_Parser**. Proxy опционален.
 
-### Параметры GHA (max, сентябрь 2026)
+### Параметры GHA (публичный, сентябрь 2026)
 
-- Расписание: **3×/сутки UTC, дни 1–26** (`0 5,13,21 1-26 * *`). Отчёт в Telegram после прогона.
-- Catalog: `--phase=primary --limit=600 --maxMinutes=45`.
-- `BL_PAUSE_MS=800,1500`, `BL_HTTP_FETCH=1`, `BL_GAP_QUEUE_RATIO=0.7`.
-- Retry: limit 60, maxMinutes 10. Queue: 15 / 8 min.
-- KPI в конце окна. Кэш Playwright в workflow.
+- Расписание: **3×/сутки UTC, дни 1–26** (`0 5,13,21 1-26 * *`). Отчёт в Telegram.
+- Job timeout **95 мин**. Catalog: `--phase=primary --limit=1200 --maxMinutes=80`.
+- `BL_PAUSE_MS=400,800`, `BL_HTTP_FETCH=1`, `BL_HTTP_429_RETRIES=1`, `BL_HTTP_429_MIN_MS=15000`, `BL_HTTP_429_MAX_MS=30000`, `BL_GAP_QUEUE_RATIO=0.7`.
+- Retry: limit **20**, maxMinutes **5**. Queue: 15 / 8 min.
+- KPI в конце окна. Playwright: `--with-deps` только если кэш пуст.
 
 ### Локально (после 26-го / добор)
 
@@ -81,9 +81,10 @@ npm run ingest:bricklink:month-gaps
 ## Что не делаем сейчас
 
 - Ежемесячный full pass всех 54k на GHA  
-- 2–3 источника  
+- 2–3 источника цен  
 - Скрейп новинки до launch+2d  
 - Показ сырого Price Guide как «цена набора»  
-- Авто-secondary (BOX/…) на GHA в окне 1–15  
+- Авто-secondary (BOX/…) по расписанию  
+- «View older version» на BrickLink (дыры старых лет)
 
 Идеи (set+box UX, чаще TTL, multi-source, Pro-график) — в `STRATEGY.md` (идея 15 / P3).

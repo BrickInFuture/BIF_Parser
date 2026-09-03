@@ -1,9 +1,9 @@
-﻿# РџСѓР±Р»РёС‡РЅС‹Р№ РїР°СЂСЃРµСЂ BrickLink вЂ” RAW-ONLY (РїРёС€РµС‚ С‚РѕР»СЊРєРѕ sold/stock).
-# РћС†РµРЅРєСѓ BIF СЃС‡РёС‚Р°РµС‚ Р·Р°РєСЂС‹С‚Р°СЏ СЃС‚РѕСЂРѕРЅР° (Cloud Function onMarketMonthlyWritten).
-# РџСѓР±Р»РёС‡РЅС‹Р№ СЂРµРїРѕР·РёС‚РѕСЂРёР№ в†’ Р±РµР·Р»РёРјРёС‚РЅС‹Рµ Р±РµСЃРїР»Р°С‚РЅС‹Рµ РјРёРЅСѓС‚С‹ Actions.
+# Публичный парсер BrickLink — RAW-ONLY (пишет только sold/stock).
+# Оценку BIF считает закрытая сторона (Cloud Function onMarketMonthlyWritten).
+# Публичный репозиторий → безлимитные бесплатные минуты Actions.
 #
-# РќСѓР¶РµРЅ СЃРµРєСЂРµС‚ FIREBASE_SERVICE_ACCOUNT_DEV (JSON СЃРµСЂРІРёСЃ-Р°РєРєР°СѓРЅС‚Р° dev-РїСЂРѕРµРєС‚Р°).
-# РћРїС†РёРѕРЅР°Р»СЊРЅРѕ: TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID, BL_PROXY_URL.
+# Нужен секрет FIREBASE_SERVICE_ACCOUNT_DEV (JSON сервис-аккаунта dev-проекта).
+# Опционально: TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID, BL_PROXY_URL.
 
 name: BrickLink parser (public, raw-only)
 
@@ -19,7 +19,7 @@ on:
         required: false
         default: "80"
   schedule:
-    # 3Г—/СЃСѓС‚РєРё, РґРЅРё 1вЂ“26 UTC = 78 РѕРєРѕРЅ/РјРµСЃ (РїСѓР±Р»РёС‡РЅС‹Р№ СЂРµРїРѕ вЂ” РјРёРЅСѓС‚С‹ Р±РµСЃРїР»Р°С‚РЅС‹).
+    # 3×/сутки, дни 1–26 UTC = 78 окон/мес (публичный репо — минуты бесплатны).
     - cron: "0 5,13,21 1-26 * *"
 
 concurrency:
@@ -29,7 +29,7 @@ concurrency:
 jobs:
   ingest:
     runs-on: ubuntu-latest
-    timeout-minutes: 65
+    timeout-minutes: 95
     env:
       DEV_PROJECT_ID: brickinfuture-306f1
       BL_RAW_ONLY: "1"
@@ -42,6 +42,7 @@ jobs:
       BL_ADAPTIVE_PAUSE: "0"
       BL_GAP_QUEUE_RATIO: "0.7"
       BL_HTTP_FETCH: "1"
+      BL_HTTP_429_RETRIES: "1"
       BL_HTTP_429_MIN_MS: "15000"
       BL_HTTP_429_MAX_MS: "30000"
       BL_PROXY_URL: ${{ secrets.BL_PROXY_URL }}
@@ -53,18 +54,25 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+          cache: npm
 
       - name: Cache Playwright Chromium
         uses: actions/cache@v4
+        id: playwright-cache
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('bricklink-parser/session.js') }}
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
 
       - name: Install deps
         run: npm install
 
       - name: Install Playwright Chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps chromium
+
+      - name: Playwright Chromium (from cache)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: npx playwright install chromium
 
       - name: Write service account
         env:
@@ -84,7 +92,7 @@ jobs:
 
       - name: Retry failed observations
         continue-on-error: true
-        run: npm run ingest:bricklink:retry-errors -- --confirm --phase=primary --limit=60 --maxMinutes=10
+        run: npm run ingest:bricklink:retry-errors -- --confirm --phase=primary --limit=20 --maxMinutes=5
 
       - name: User refresh queue
         run: npm run ingest:bricklink:queue -- --confirm --limit=15 --maxMinutes=8
@@ -102,4 +110,3 @@ jobs:
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: node bricklink-parser/notifyIngestReport.js
-

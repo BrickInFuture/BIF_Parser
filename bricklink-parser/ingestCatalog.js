@@ -22,7 +22,8 @@
  * Skips recent soft_blocked observations (<24h) and jumps off a same-base variant cluster
  * after 2 consecutive soft-blocks so SET_8831-* cannot stall the monthly cursor.
  * Circuit (stop window) only when 5 distinct bases soft-block (IP likely hot).
- * Catalog pass uses shallow fetch (no deep soft_block/WAF retries) — depth is in retry-errors.
+ * Catalog pass uses shallow fetch (no deep soft_block/WAF retries). Retry-errors
+ * skips soft_blocked younger than 24h and prefers parse_error.
  * On scrape fail: writes observation error, does NOT overwrite last-good bif_prices.
  *
  * Local Wi‑Fi tips: see LOCAL_WIFI.md — prefer --limit=300..500, pause after Oops/circuit storms.

@@ -691,11 +691,8 @@ function parseCatalogPgHtml(html) {
     result.ok = true;
     result.empty = false;
     result.monthlySold = parseMonthlySoldSections(raw);
-    if (!result.monthlySold.length) {
-      result.ok = false;
-      result.empty = false;
-      result.error = `Found PG summary but no closed monthly sold sections (title=${title || "?"} bytes=${htmlBytes})`;
-    }
+    // Сводка Last 6 Months есть — этого достаточно для точки. Нет помесячных
+    // блоков на странице → пишем только сводку, не помечаем весь скрейп ошибкой.
     return result;
   }
 

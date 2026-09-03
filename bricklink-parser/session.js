@@ -778,7 +778,7 @@ class BrickLinkSession {
     let res = await this.#httpGet(url);
     if (timing) timing.navMs += res.ms;
 
-    const max429Retries = Math.max(0, Number(process.env.BL_HTTP_429_RETRIES || 2) || 2);
+    const max429Retries = Math.max(0, Number(process.env.BL_HTTP_429_RETRIES || 1) || 1);
     let attempts429 = 0;
     while (res.status === 429 && attempts429 < max429Retries) {
       attempts429 += 1;

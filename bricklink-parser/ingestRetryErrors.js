@@ -13,7 +13,7 @@
 
 const { initFirebaseAdmin } = require("./firebaseAdmin");
 const { BrickLinkSession, HTTP_METHOD } = require("./session");
-const { normalizeSetNo } = require("./parseHtml");
+const { normalizeSetNo, errorLooksLikeSoftBlock } = require("./parseHtml");
 const { writeObservationFromParse } = require("./observationWriter");
 const { utcYearMonth } = require("./gapLedger");
 const { loadOrCreateRun, patchRun, runDocId } = require("./checkpoint");
@@ -44,6 +44,7 @@ const LIMIT = Math.max(1, Number(flagValue("limit", "100")) || 100);
 const MAX_MINUTES = Math.max(1, Number(flagValue("maxMinutes", "60")) || 60);
 const PHASE_FLAG = String(flagValue("phase", "auto") || "auto").toLowerCase();
 const TYPES_CSV = flagValue("types", null);
+const SOFT_BLOCK_SKIP_MS = 24 * 60 * 60 * 1000;
 
 async function listErrorObservations(db, admin, wantLimit, typePlan) {
   const pooled = [];
@@ -82,9 +83,26 @@ async function listErrorObservations(db, admin, wantLimit, typePlan) {
   }
 
   const picked = pickRetryRows(pooled, typePlan);
-  // Prefer older failures so we don't thrash the same hot soft_blocks.
-  picked.sort((a, b) => (a.updatedAtMs || 0) - (b.updatedAtMs || 0));
+  picked.sort((a, b) => {
+    const pr = retryPriority(a) - retryPriority(b);
+    if (pr !== 0) return pr;
+    return (a.updatedAtMs || 0) - (b.updatedAtMs || 0);
+  });
   return picked.slice(0, wantLimit);
+}
+
+function isFreshSoftBlock(row) {
+  if (!errorLooksLikeSoftBlock(row.errorTag, row.error)) return false;
+  return Date.now() - (row.updatedAtMs || 0) < SOFT_BLOCK_SKIP_MS;
+}
+
+/** parse_error first; skip burning the tail on yesterday's Oops. */
+function retryPriority(row) {
+  const t = String(row.errorTag || "");
+  if (t === "parse_error" || t === "unmapped_blocks") return 0;
+  if (t === "partial_prices") return 1;
+  if (errorLooksLikeSoftBlock(t, row.error)) return 3;
+  return 2;
 }
 
 function pickRetryRows(errors, typePlan) {
@@ -99,16 +117,20 @@ function pickRetryRows(errors, typePlan) {
     else other.push(row);
   }
 
+  const dropFreshSoft = (rows) => rows.filter((r) => !isFreshSoftBlock(r));
+
   if (typePlan.phase === "custom") {
-    return errors.filter((r) => allowed.has(String(r.itemType || "SET").toUpperCase()));
+    return dropFreshSoft(
+      errors.filter((r) => allowed.has(String(r.itemType || "SET").toUpperCase()))
+    );
   }
   if (typePlan.phase === "secondary") {
-    return [...secondary, ...other.filter((r) => allowed.has(r.itemType))];
+    return dropFreshSoft([...secondary, ...other.filter((r) => allowed.has(r.itemType))]);
   }
   // primary / auto: SET+MINIFIG first; only fall through to secondary if none left
-  if (primary.length) return primary;
-  if (typePlan.allowSecondary || PHASE_FLAG === "secondary") return secondary;
-  return primary;
+  if (primary.length) return dropFreshSoft(primary);
+  if (typePlan.allowSecondary || PHASE_FLAG === "secondary") return dropFreshSoft(secondary);
+  return dropFreshSoft(primary);
 }
 
 async function main() {
@@ -149,57 +171,52 @@ async function main() {
     )
   );
 
-  // Defer retry only when monthly soft-block rate is extreme.
-  // Do NOT skip solely for circuitOpenThisWindow — cool briefly and continue clearing
-  // SET/MINIFIG errors (catalog already cooled or stopped; retry is the recovery path).
+  // Catalog already hit a 429 storm this window — do not spend the tail on the same IP.
   const tags = runData.errorTagCounts || {};
   const softN = Number(tags.soft_blocked) || 0;
   const attemptedMonth = (Number(runData.ok) || 0) + (Number(runData.fail) || 0);
   const softRate = attemptedMonth > 0 ? softN / attemptedMonth : 0;
   const softRateMax = Number(process.env.BL_RETRY_SOFT_RATE_MAX || 0.55);
   const circuitThisWindow = runData.circuitOpenThisWindow === true;
+
+  function finishRetrySkip(reason, extra) {
+    const summary = {
+      periodId,
+      skipped: true,
+      reason,
+      attempted: 0,
+      chunkOk: 0,
+      chunkFail: 0,
+      retryOk,
+      retryFail,
+      dryRun: !CONFIRM,
+      ...extra,
+    };
+    console.log(JSON.stringify({ step: "retry_skipped", ...summary }));
+    console.log("\n--- retry-errors summary ---");
+    console.log(JSON.stringify(summary, null, 2));
+    writeIngestArtifact("retry", summary);
+  }
+
+  if (circuitThisWindow) {
+    finishRetrySkip("catalog_circuit", {
+      circuitOpenThisWindow: true,
+      circuitTrips: runData.circuitTrips || 0,
+      lastError: runData.lastError || null,
+    });
+    return;
+  }
+
   if (attemptedMonth >= 40 && softRate >= softRateMax) {
-    const skip = {
-      step: "retry_skipped_hot_session",
+    finishRetrySkip("soft_block_rate", {
       softRate: Math.round(softRate * 1000) / 1000,
       softRateMax,
       soft_blocked: softN,
       attemptedMonth,
       lastError: runData.lastError || null,
-      circuitOpenThisWindow: circuitThisWindow,
       circuitTrips: runData.circuitTrips || 0,
-    };
-    console.log(JSON.stringify(skip));
-    console.log("\n--- retry-errors summary ---");
-    console.log(
-      JSON.stringify(
-        {
-          periodId,
-          skipped: true,
-          reason: "soft_block_rate",
-          ...skip,
-          dryRun: !CONFIRM,
-        },
-        null,
-        2
-      )
-    );
+    });
     return;
-  }
-
-  if (circuitThisWindow) {
-    const coolMs = Number(process.env.BL_RETRY_CIRCUIT_COOL_MS || 45000) || 45000;
-    console.log(
-      JSON.stringify({
-        step: "retry_cool_after_catalog_circuit",
-        coolMs,
-        softRate: Math.round(softRate * 1000) / 1000,
-      })
-    );
-    await new Promise((r) => setTimeout(r, coolMs));
-    if (CONFIRM) {
-      await patchRun(runRef, FieldValue, { circuitOpenThisWindow: false }, false);
-    }
   }
 
   const errors = await listErrorObservations(db, admin, LIMIT, typePlan);
