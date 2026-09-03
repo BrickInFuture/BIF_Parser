@@ -365,6 +365,8 @@ async function main() {
   let lastSoftBaseKey = null;
   const mixedSoftBases = new Set();
   let circuitOpenThisWindow = false;
+  // Очередь страницы/дыр снаружи try — прыжок курсора должен уметь её сбросить.
+  let pendingItems = [];
 
   function noteClusterSoft(cat) {
     const base = catalogBaseKey(cat.itemType, cat.itemNumber);
@@ -648,7 +650,7 @@ async function main() {
             LIMIT,
             Math.max(0, Math.floor(LIMIT * (Number.isFinite(gapRatio) ? gapRatio : 0.7)))
           );
-    let pendingItems = [];
+    pendingItems = [];
     const gapHandled = new Set();
 
     async function buildGapPendingItems(maxTasks, maxScan) {
