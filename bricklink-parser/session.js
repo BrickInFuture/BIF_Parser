@@ -456,7 +456,9 @@ class BrickLinkSession {
         looksEmptyPriceGuide(html));
     let error = parsed.error || null;
     if (res.err) error = res.err;
-    else if (res.status === 429) error = "HTTP 429 Too Many Requests";
+    // 429 = сайт режет частоту. Помечаем как soft-block, чтобы схема "5 подряд →
+    // прыжок на другую серию" сработала, а не копилось как parse_error.
+    else if (res.status === 429) error = "Soft-blocked (HTTP 429 rate limit)";
     else if (res.status >= 400) error = `HTTP ${res.status}`;
     else if (blocked) error = parsed.error || "Blocked Price Guide page";
     return {
@@ -514,9 +516,10 @@ class BrickLinkSession {
   async #circuitCool() {
     const [lo, hi] = circuitCoolRange();
     let ms = randomInRange(lo, hi);
-    // Escalate after the first trip in this session (1.5× per extra trip, cap 3×).
-    if (this.circuitTrips > 1) {
-      const factor = Math.min(3, Math.pow(1.5, this.circuitTrips - 1));
+    // Мягкая эскалация: реальное восстановление — прыжок на другую серию номеров
+    // (catalog_cool_mixed_bases), а не долгий сон. Держим потолок ~1.5×, не 3×.
+    if (this.circuitTrips > 2) {
+      const factor = Math.min(1.5, 1 + 0.25 * (this.circuitTrips - 2));
       ms = Math.round(ms * factor);
     }
     console.log(
@@ -524,7 +527,7 @@ class BrickLinkSession {
         step: "circuit_cool_ms",
         ms,
         circuitTrips: this.circuitTrips,
-        escalated: this.circuitTrips > 1,
+        escalated: this.circuitTrips > 2,
       })
     );
     await sleep(ms);
@@ -778,7 +781,12 @@ class BrickLinkSession {
     let res = await this.#httpGet(url);
     if (timing) timing.navMs += res.ms;
 
-    const max429Retries = Math.max(0, Number(process.env.BL_HTTP_429_RETRIES || 1) || 1);
+    // В каталоге (shallow) на 429 не ждём вообще — сразу soft-block и следующий набор.
+    // Глубокий повтор — только в ручном/Pro режиме (retry-errors).
+    const shallow = !!opts.catalogPass || !!opts.fastFail;
+    const max429Retries = shallow
+      ? 0
+      : Math.max(0, Number(process.env.BL_HTTP_429_RETRIES || 1) || 1);
     let attempts429 = 0;
     while (res.status === 429 && attempts429 < max429Retries) {
       attempts429 += 1;
