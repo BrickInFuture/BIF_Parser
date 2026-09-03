@@ -11,17 +11,17 @@ on:
   workflow_dispatch:
     inputs:
       limit:
-        description: "Max real scrapes per catalog chunk (SET+MINIFIG)"
+        description: "Max scrapes per short burst (SET+MINIFIG); stay under IP heat (~60)"
         required: false
-        default: "1200"
+        default: "60"
       maxMinutes:
-        description: "Catalog chunk max minutes"
+        description: "Catalog burst max minutes"
         required: false
-        default: "80"
+        default: "15"
   schedule:
-    # 8×/сутки (каждые 3 ч), дни 1–26 UTC — цель ~2000 успешных цен/день.
-    # Окно ≤95 мин < 3 ч, окна не наезжают друг на друга.
-    - cron: "0 1,4,7,10,13,16,19,22 1-26 * *"
+    # Короткие залпы: ~60 попыток, стоп при жаре. Каждые 40 мин, дни 1–26 UTC.
+    # Цель ≥2000 успешных/день без длинных охлаждаек.
+    - cron: "0,40 * 1-26 * *"
 
 concurrency:
   group: bricklink-parser-public
@@ -30,7 +30,7 @@ concurrency:
 jobs:
   ingest:
     runs-on: ubuntu-latest
-    timeout-minutes: 95
+    timeout-minutes: 25
     env:
       DEV_PROJECT_ID: brickinfuture-306f1
       BL_RAW_ONLY: "1"
@@ -38,6 +38,8 @@ jobs:
       BL_PAUSE_MS: "400,800"
       BL_SOFT_BLOCK_FAST_MS: "3000"
       BL_CIRCUIT_SOFT_LIMIT: "5"
+      # После 5 «сайт режет» — стоп окна (без 1–2 мин сна). Следующий залп через ~40 мин.
+      BL_CIRCUIT_STOP: "1"
       BL_CIRCUIT_COOL_MIN_MS: "60000"
       BL_CIRCUIT_COOL_MAX_MS: "120000"
       BL_ADAPTIVE_PAUSE: "0"
@@ -87,13 +89,13 @@ jobs:
 
       - name: Catalog ingest chunk (primary SET+MINIFIG, raw-only)
         env:
-          LIMIT: ${{ github.event.inputs.limit || '1200' }}
-          MAX_MINUTES: ${{ github.event.inputs.maxMinutes || '80' }}
+          LIMIT: ${{ github.event.inputs.limit || '60' }}
+          MAX_MINUTES: ${{ github.event.inputs.maxMinutes || '15' }}
         run: npm run ingest:bricklink:catalog -- --confirm --phase=primary --limit="$LIMIT" --maxMinutes="$MAX_MINUTES"
 
       - name: Retry failed observations
         continue-on-error: true
-        run: npm run ingest:bricklink:retry-errors -- --confirm --phase=primary --limit=20 --maxMinutes=5
+        run: npm run ingest:bricklink:retry-errors -- --confirm --phase=primary --limit=10 --maxMinutes=3
 
       - name: User refresh queue
         run: npm run ingest:bricklink:queue -- --confirm --limit=15 --maxMinutes=8

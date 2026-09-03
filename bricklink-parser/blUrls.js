@@ -1,13 +1,15 @@
 /**
  * BrickLink catalog URL helpers (source adapter).
- * BIF itemType → BrickLink catalogPG query param.
+ *
+ * Канон Price Guide для BIF: ТОЛЬКО «View older version» =
+ *   https://www.bricklink.com/catalogPG.asp?S=75192-1
+ * (ссылка с новой v2-карточки «View older version» ведёт сюда).
+ * Новую вкладку v2/catalog/catalogitem.page#T=P НЕ используем —
+ * там нет полной помесячной истории в одном HTML.
  *
  *   SET  → S=75192-1
- *   GEAR → G=100871   (no -1 variant by convention)
+ *   GEAR → G=100871
  *   MINIFIG → M=...
- *
- * CMF figures keep Brickset numbers in catalog_items (MINIFIG_71051-1) but
- * must be fetched as M=col461 via brickLinkNo — see resolveBrickLinkFetch().
  */
 "use strict";
 
@@ -44,12 +46,18 @@ function normalizeItemNumber(raw, itemType = "SET") {
   return s;
 }
 
+/** Classic Price Guide = «View older version» (full monthly sold history). */
 function brickLinkCatalogPgUrl(itemType, itemNumber) {
   const t = String(itemType || "SET").toUpperCase();
   const prefix = BL_TYPE_PREFIX[t] || "S";
   const no = normalizeItemNumber(itemNumber, t);
   if (!no) throw new Error("itemNumber is required");
   return `https://www.bricklink.com/catalogPG.asp?${prefix}=${encodeURIComponent(no)}`;
+}
+
+/** Alias: same URL — explicit name for «View older version only». */
+function brickLinkOlderPriceGuideUrl(itemType, itemNumber) {
+  return brickLinkCatalogPgUrl(itemType, itemNumber);
 }
 
 /**
@@ -88,6 +96,7 @@ module.exports = {
   BL_TYPE_PREFIX,
   normalizeItemNumber,
   brickLinkCatalogPgUrl,
+  brickLinkOlderPriceGuideUrl,
   isMistypedGearAsSet,
   resolveBrickLinkFetch,
 };

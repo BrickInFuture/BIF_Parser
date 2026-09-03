@@ -2,8 +2,8 @@
 
 Канон для bulk ingest, GHA и локальных догонов. Код: `coveragePolicy.js`, `ingestCatalog.js`, `writeRawObservation.js` + `observationWriter.js` (BIF — закрыто: `functions/bifFromObservation.js`).
 
-**Источник сейчас:** BrickLink HTML Price Guide — сводка + **все** помесячные sold-блоки на странице (не только последние 6 месяцев). Если сводка есть, а помесячных заголовков нет — всё равно **ok** (пишем сводку).  
-Публично в UI — только **BIF** (не сырые avg гида).
+**Источник сейчас:** BrickLink **только** classic Price Guide `catalogPG.asp` (= кнопка **View older version**). Сводка + **все** помесячные sold-блоки на странице (годы истории, не «только 6 месяцев»). Если сводка есть, а помесячных заголовков нет — всё равно **ok**.  
+Новую v2-вкладку `#T=P` **не** открываем. Публично в UI — только **BIF**.
 
 ---
 
@@ -33,7 +33,7 @@ BOX / INSTRUCTION / GEAR — **локально руками** после 26-г�
 
 | Дни месяца | Канал | Что |
 |------------|--------|-----|
-| **1–26** | **публичный** `BIF_Parser` по cron | primary SET+MINIFIG, HTTP token, limit 1200, 80 мин |
+| **1–26** | **публичный** `BIF_Parser` по cron | короткие залпы: limit **60**, каждые **40 мин**, стоп при жаре |
 | **27–конец** | **Локально руками** (при необходимости) | добить дыры / secondary |
 | **всегда** | Pro refresh (кнопка на сайте) | полный скрейп; очередь в привате — **только dispatch** |
 
@@ -85,6 +85,6 @@ npm run ingest:bricklink:month-gaps
 - Скрейп новинки до launch+2d  
 - Показ сырого Price Guide как «цена набора»  
 - Авто-secondary (BOX/…) по расписанию  
-- «View older version» на BrickLink (дыры старых лет)
+- Новая v2-вкладка Price Guide (только classic `catalogPG.asp` = View older version)
 
 Идеи (set+box UX, чаще TTL, multi-source, Pro-график) — в `STRATEGY.md` (идея 15 / P3).
