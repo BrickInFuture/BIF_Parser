@@ -17,6 +17,14 @@ function n(v) {
   return String(v);
 }
 
+/** Секунды → коротко по-русски: "19 с" / "3.2 мин". */
+function formatSecPerOk(sec) {
+  const s = Number(sec);
+  if (!Number.isFinite(s) || s <= 0) return "—";
+  if (s < 90) return `${Math.round(s * 10) / 10} с`;
+  return `${Math.round((s / 60) * 10) / 10} мин`;
+}
+
 function buildReportText() {
   const catalog = readIngestArtifact("catalog") || {};
   const retry = readIngestArtifact("retry") || {};
@@ -33,6 +41,28 @@ function buildReportText() {
           ? "отменён"
           : conclusion;
 
+  // Честный % этого окна: цены / запросы (не путать с месячным successPct).
+  const chunkDone = Number(catalog.chunkDone) || 0;
+  const chunkOk = Number(catalog.chunkOkWithPrices) || 0;
+  const chunkPct =
+    catalog.chunkSuccessPct != null
+      ? catalog.chunkSuccessPct
+      : chunkDone > 0
+        ? Math.round((chunkOk / chunkDone) * 1000) / 10
+        : null;
+  const secPerOk =
+    catalog.secPerOkWithPrices != null
+      ? catalog.secPerOkWithPrices
+      : chunkOk > 0 && catalog.scrapeElapsedSec
+        ? Math.round((Number(catalog.scrapeElapsedSec) / chunkOk) * 10) / 10
+        : null;
+  const okPerHour =
+    catalog.okPerHour != null
+      ? catalog.okPerHour
+      : secPerOk > 0
+        ? Math.round((3600 / secPerOk) * 10) / 10
+        : null;
+
   const lines = [
     `BrickLink парсер — прогон ${statusRu}`,
     `Месяц: ${n(kpi.periodId || catalog.periodId)} · событие: ${n(event)}`,
@@ -41,7 +71,8 @@ function buildReportText() {
     `• запросов: ${n(catalog.chunkDone)}`,
     `• с ценами: ${n(catalog.chunkOkWithPrices)}`,
     `• без данных: ${n(catalog.chunkNoData)}`,
-    `• успех: ${n(catalog.successPct)}%`,
+    `• успех: ${n(chunkPct)}%`,
+    `• на 1 цену: ${formatSecPerOk(secPerOk)}${okPerHour != null ? ` (~${n(okPerHour)} цен/час)` : ""}`,
     "",
     "Повтор ошибок:",
     `• попыток: ${n(retry.attempted)} · OK ${n(retry.chunkOk)} · fail ${n(retry.chunkFail)}`,

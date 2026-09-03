@@ -120,6 +120,12 @@ const SOFT_BLOCK_SKIP_MS = 24 * 60 * 60 * 1000;
 const SAME_BASE_SOFT_JUMP = 2;
 /** Distinct bases that soft-blocked this window before we treat the IP as hot. */
 const MIXED_BASE_CIRCUIT = 5;
+/** After a hot-IP cool: skip this many catalog pages (×50) so we leave the sticky zone. */
+const HOT_ZONE_JUMP_PAGES = Math.max(
+  1,
+  Number(process.env.BL_HOT_ZONE_JUMP_PAGES || 3) || 3
+);
+const HOT_ZONE_JUMP_PAGE_SIZE = 50;
 
 function catalogBaseKey(itemType, itemNumber) {
   const num = String(itemNumber || "").trim();
@@ -382,6 +388,47 @@ async function main() {
     lastSoftBaseKey = null;
   }
 
+  /**
+   * После волны «сайт режет» не остаёмся на тех же номерах:
+   * сбрасываем очередь страницы и прыгаем курсор на несколько страниц вперёд.
+   */
+  async function jumpCursorPastHotZone(reason) {
+    const fromId = cursorCatalogId;
+    pendingItems = [];
+    let pagesJumped = 0;
+    let lastId = cursorCatalogId;
+    for (let i = 0; i < HOT_ZONE_JUMP_PAGES; i += 1) {
+      const page = await fetchCatalogPageByType(
+        db,
+        admin,
+        cursorType,
+        lastId,
+        HOT_ZONE_JUMP_PAGE_SIZE
+      );
+      if (!page.length) break;
+      lastId = page[page.length - 1].catalogItemId;
+      cursorItemNumber = page[page.length - 1].itemNumber || cursorItemNumber;
+      pagesJumped += 1;
+    }
+    if (lastId && lastId !== cursorCatalogId) {
+      cursorCatalogId = lastId;
+      typeCursors[cursorType] = cursorCatalogId;
+    }
+    skipBaseKey = null;
+    console.log(
+      JSON.stringify({
+        step: "catalog_cursor_jump_ahead",
+        reason: reason || "hot_zone",
+        from: fromId,
+        to: cursorCatalogId,
+        pagesJumped,
+        pageSize: HOT_ZONE_JUMP_PAGE_SIZE,
+        circuitTrips: session.circuitTrips || 0,
+      })
+    );
+    await saveCheckpoint();
+  }
+
   function applyClusterAfterSoft(cat) {
     const cluster = noteClusterSoft(cat);
     if (cluster.jump) {
@@ -420,13 +467,15 @@ async function main() {
         );
       } else {
         circuitOpenThisWindow = false;
+        // Реальный уход: очередь сбросим и курсор уведём в jumpCursorPastHotZone (async).
+        cluster.needsCursorJump = true;
         console.log(
           JSON.stringify({
             step: "catalog_cool_mixed_bases",
             mixedBases: cluster.mixedBases,
             circuitTrips: session.circuitTrips,
             cursorCatalogId,
-            action: "continue_after_jump",
+            action: "jump_cursor_ahead",
           })
         );
       }
@@ -468,6 +517,8 @@ async function main() {
     headless: HEADLESS,
     pauseMs: process.env.BL_PAUSE_MS ? undefined : [1500, 3000],
   });
+
+  let scrapeStartedMs = startedMs;
 
   async function saveCheckpoint(extra = {}) {
     if (!CONFIRM) return;
@@ -631,6 +682,7 @@ async function main() {
     ]);
     pendingItems = initialGapItems;
     deadlineMs = Date.now() + MAX_MINUTES * 60 * 1000;
+    scrapeStartedMs = Date.now();
     console.log(
       JSON.stringify({
         step: "scrape_window_start",
@@ -865,7 +917,10 @@ async function main() {
             );
           }
           await saveCheckpoint();
-          if (isSoftBlockTag("exception", lastError)) applyClusterAfterSoft(cat);
+          if (isSoftBlockTag("exception", lastError)) {
+            const cluster = applyClusterAfterSoft(cat);
+            if (cluster?.needsCursorJump) await jumpCursorPastHotZone("mixed_soft_exception");
+          }
           continue;
         }
 
@@ -895,7 +950,8 @@ async function main() {
           }
           await saveCheckpoint();
           if (isSoftBlockTag(scrape.errorTag, lastError)) {
-            applyClusterAfterSoft(cat);
+            const cluster = applyClusterAfterSoft(cat);
+            if (cluster?.needsCursorJump) await jumpCursorPastHotZone("mixed_soft_block");
           } else if (session.isCircuitOpen()) {
             circuitOpenThisWindow = true;
             lastError = "circuit_open_stop_window";
@@ -983,7 +1039,21 @@ async function main() {
   const timedOut = Date.now() >= deadlineMs && !exhausted;
   const status = exhausted ? "done" : "running";
   const attempted = ok + fail;
+  // Накопительный % за месяц (ok / ok+fail) — не путать с этим окном.
   const successPct = attempted > 0 ? Math.round((ok / attempted) * 1000) / 10 : null;
+  // Честный % именно этого прогона: цены / запросы.
+  const chunkSuccessPct =
+    chunkDone > 0 ? Math.round((chunkOkWithPrices / chunkDone) * 1000) / 10 : null;
+  const scrapeElapsedSec = Math.max(1, Math.round((Date.now() - scrapeStartedMs) / 1000));
+  // Стена времени окна / число успешных цен — сколько реально уходит на 1 цену.
+  const secPerOkWithPrices =
+    chunkOkWithPrices > 0
+      ? Math.round((scrapeElapsedSec / chunkOkWithPrices) * 10) / 10
+      : null;
+  const okPerHour =
+    chunkOkWithPrices > 0 && scrapeElapsedSec > 0
+      ? Math.round((chunkOkWithPrices / scrapeElapsedSec) * 3600 * 10) / 10
+      : null;
 
   if (CONFIRM) {
     await patchRun(
@@ -1053,6 +1123,10 @@ async function main() {
     fail,
     skipped,
     successPct,
+    chunkSuccessPct,
+    scrapeElapsedSec,
+    secPerOkWithPrices,
+    okPerHour,
     errorTagCounts,
     timingStats,
     avgSecOk,
