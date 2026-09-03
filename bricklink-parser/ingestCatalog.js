@@ -367,6 +367,8 @@ async function main() {
   let circuitOpenThisWindow = false;
   // Очередь страницы/дыр снаружи try — прыжок курсора должен уметь её сбросить.
   let pendingItems = [];
+  /** После волны «сайт режет» не забиваем окно снова очередью дыр (она отменяла прыжок). */
+  let gapPausedAfterHot = false;
 
   function noteClusterSoft(cat) {
     const base = catalogBaseKey(cat.itemType, cat.itemNumber);
@@ -397,6 +399,8 @@ async function main() {
   async function jumpCursorPastHotZone(reason) {
     const fromId = cursorCatalogId;
     pendingItems = [];
+    // Дыры (популярные «дыры в месяцах») снова бьют в горячий IP — до конца окна только курсор.
+    gapPausedAfterHot = true;
     let pagesJumped = 0;
     let lastId = cursorCatalogId;
     for (let i = 0; i < HOT_ZONE_JUMP_PAGES; i += 1) {
@@ -426,6 +430,7 @@ async function main() {
         pagesJumped,
         pageSize: HOT_ZONE_JUMP_PAGE_SIZE,
         circuitTrips: session.circuitTrips || 0,
+        gapPausedAfterHot: true,
       })
     );
     await saveCheckpoint();
@@ -707,6 +712,16 @@ async function main() {
 
     async function refillGapQueueIfNeeded() {
       if (QUEUE_MODE === "cursor" || gapBudget <= 0 || !CONFIRM) return false;
+      if (gapPausedAfterHot) {
+        console.log(
+          JSON.stringify({
+            step: "gap_queue_skip_after_hot",
+            chunkDone,
+            reason: "resume_cursor_only",
+          })
+        );
+        return false;
+      }
       const remaining = LIMIT - chunkDone;
       if (remaining <= 0 || Date.now() >= deadlineMs) return false;
       const batchSize = Math.min(remaining, Math.max(40, Math.floor(gapBudget / 2)));
@@ -1138,6 +1153,7 @@ async function main() {
     circuitOpenThisWindow,
     skipBaseKey,
     mixedSoftBases: mixedSoftBases.size,
+    gapPausedAfterHot,
     cursorItemNumber,
     cursorCatalogId,
     shardIndex: SHARD_INDEX,
