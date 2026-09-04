@@ -710,6 +710,56 @@ async function main() {
       );
     }
 
+    /** Снимок для телеги, если GitHub отменил job посреди окна. */
+    function flushPartialCatalogArtifact(reason) {
+      const scrapeElapsedSec = Math.max(1, Math.round((Date.now() - scrapeStartedMs) / 1000));
+      const chunkSuccessPct =
+        chunkDone > 0 ? Math.round((chunkOkWithPrices / chunkDone) * 1000) / 10 : null;
+      const secPerOkWithPrices =
+        chunkOkWithPrices > 0
+          ? Math.round((scrapeElapsedSec / chunkOkWithPrices) * 10) / 10
+          : null;
+      writeIngestArtifact("catalog", {
+        runId: run.id,
+        periodId,
+        status: "aborted",
+        abortedReason: reason || "signal",
+        timedOut: false,
+        chunkDone,
+        chunkOkWithPrices,
+        chunkNoData,
+        chunkSuccessPct,
+        scrapeElapsedSec,
+        secPerOkWithPrices,
+        okPerHour:
+          chunkOkWithPrices > 0
+            ? Math.round((chunkOkWithPrices / scrapeElapsedSec) * 3600 * 10) / 10
+            : null,
+        ok,
+        fail,
+        skipped,
+        errorTagCounts,
+        circuitTrips: session.circuitTrips || 0,
+        circuitOpen: session.isCircuitOpen(),
+        circuitOpenThisWindow,
+        gapPausedAfterHot,
+        cursorCatalogId,
+        elapsedSec: Math.round((Date.now() - startedMs) / 1000),
+        dryRun: !CONFIRM,
+      });
+    }
+    const onAbortSignal = (sig) => {
+      try {
+        stopWindow = true;
+        flushPartialCatalogArtifact(sig);
+      } catch (_) {
+        /* ignore */
+      }
+      process.exit(143);
+    };
+    process.once("SIGTERM", () => onAbortSignal("SIGTERM"));
+    process.once("SIGINT", () => onAbortSignal("SIGINT"));
+
     async function refillGapQueueIfNeeded() {
       if (QUEUE_MODE === "cursor" || gapBudget <= 0 || !CONFIRM) return false;
       if (gapPausedAfterHot) {

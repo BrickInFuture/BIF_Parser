@@ -12,6 +12,24 @@
 const fs = require("fs");
 const { readIngestArtifact } = require("./ingestReportArtifacts");
 
+/** Часовой пояс отчёта (владелец в UTC+4). */
+const REPORT_TZ = process.env.BL_REPORT_TZ || "Asia/Dubai";
+
+const MONTHS_RU = [
+  "января",
+  "февраля",
+  "марта",
+  "апреля",
+  "мая",
+  "июня",
+  "июля",
+  "августа",
+  "сентября",
+  "октября",
+  "ноября",
+  "декабря",
+];
+
 function n(v) {
   if (v == null || v === "") return "—";
   return String(v);
@@ -25,6 +43,145 @@ function formatSecPerOk(sec) {
   return `${Math.round((s / 60) * 10) / 10} мин`;
 }
 
+/** "3 сентября 2026, 04:04 утра" */
+function formatReportDateRu(date = new Date(), timeZone = REPORT_TZ) {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone,
+    day: "numeric",
+    month: "numeric",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
+  const get = (type) => parts.find((p) => p.type === type)?.value;
+  const day = Number(get("day"));
+  const month = Number(get("month"));
+  const year = Number(get("year"));
+  const hour = Number(get("hour"));
+  const minute = String(get("minute") || "00").padStart(2, "0");
+  const hourStr = String(hour).padStart(2, "0");
+  // Как в примере: «04:04 утра» (ночь только 0–3).
+  let dayPart = "дня";
+  if (hour >= 0 && hour < 4) dayPart = "ночи";
+  else if (hour >= 4 && hour < 12) dayPart = "утра";
+  else if (hour >= 12 && hour < 17) dayPart = "дня";
+  else dayPart = "вечера";
+  return `${day} ${MONTHS_RU[month - 1]} ${year}, ${hourStr}:${minute} ${dayPart}`;
+}
+
+/**
+ * 🟢 успех ≥80%, 🟡 ниже, 🔴 отменён / ошибка / нет данных прогона.
+ */
+function statusCircle(conclusion, chunkPct) {
+  if (conclusion === "cancelled" || conclusion === "failure") return "🔴";
+  if (chunkPct == null || !Number.isFinite(Number(chunkPct))) return "🟡";
+  if (Number(chunkPct) >= 80) return "🟢";
+  return "🟡";
+}
+
+function statusRu(conclusion) {
+  if (conclusion === "success") return "OK";
+  if (conclusion === "failure") return "ОШИБКА";
+  if (conclusion === "cancelled") return "отменён";
+  return conclusion || "unknown";
+}
+
+function eventRu(event) {
+  if (event === "schedule") return "по расписанию";
+  if (event === "workflow_dispatch") return "ручной запуск";
+  return event || "—";
+}
+
+function topErrorTags(errorTagCounts, limit = 3) {
+  const entries = Object.entries(errorTagCounts || {})
+    .map(([k, v]) => [k, Number(v) || 0])
+    .filter(([, v]) => v > 0)
+    .sort((a, b) => b[1] - a[1]);
+  return entries.slice(0, limit);
+}
+
+function tagRu(tag) {
+  const t = String(tag || "");
+  if (t === "soft_blocked") return "сайт режет (Oops/429)";
+  if (t === "parse_error") return "не разобрали HTML";
+  if (t === "partial_prices") return "цены частично";
+  if (t === "timeout") return "таймаут";
+  if (t === "waf_blocked") return "жёсткая защита сайта";
+  if (t === "exception") return "сбой запроса";
+  return t;
+}
+
+/** Короткий разбор: что случилось в этом окне. */
+function buildAnalysis({ conclusion, catalog, retry, chunkPct, chunkDone, chunkOk }) {
+  const lines = [];
+  const timedOut = catalog.timedOut === true;
+  const circuitStop =
+    catalog.circuitOpenThisWindow === true ||
+    catalog.stopRequested === true ||
+    (Number(catalog.circuitTrips) > 0 && conclusion === "success" && chunkDone > 0 && chunkDone < 60);
+  const trips = Number(catalog.circuitTrips) || 0;
+  const tags = topErrorTags(catalog.errorTagCounts);
+  const soft = Number(catalog.errorTagCounts?.soft_blocked) || 0;
+  const parseErr = Number(catalog.errorTagCounts?.parse_error) || 0;
+  const gapPaused = catalog.gapPausedAfterHot === true;
+  const scrapeSec = Number(catalog.scrapeElapsedSec) || 0;
+  const retryFail = Number(retry.chunkFail) || 0;
+  const retryOk = Number(retry.chunkOk) || 0;
+  const retryAttempted = Number(retry.attempted) || 0;
+
+  if (conclusion === "cancelled") {
+    if (!chunkDone) {
+      lines.push("Прогон оборвали до сводки — цифр этого окна нет (отмена / новый запуск поверх).");
+    } else {
+      lines.push(`Прогон оборвали после ${chunkDone} запросов (${chunkOk} с ценами).`);
+    }
+  } else if (conclusion === "failure") {
+    lines.push("Прогон упал с ошибкой — смотри лог по ссылке.");
+  } else if (timedOut) {
+    lines.push("Упёрлись в лимит времени окна, не все попытки успели.");
+  } else if (trips > 0 && (catalog.circuitOpen || circuitStop)) {
+    const waveWord =
+      trips === 1 ? "волну" : trips >= 2 && trips <= 4 ? "волны" : "волн";
+    lines.push(
+      `Окно остановили из‑за жары IP: ${trips} ${waveWord} «сайт режет» (стоп после отказов).`
+    );
+  } else if (chunkPct != null && Number(chunkPct) >= 80) {
+    lines.push("Залп прошёл нормально: большинство запросов дали цены.");
+  } else if (chunkPct != null && Number(chunkPct) < 80) {
+    lines.push("Успех ниже 80% — сайт часто резал или много пустых/битых страниц.");
+  } else if (!chunkDone) {
+    lines.push("Каталог в этом прогоне почти ничего не записал — сводки нет.");
+  }
+
+  if (soft > 0) {
+    lines.push(`Отказов «сайт режет»: ${soft}.`);
+  }
+  if (parseErr > 0) {
+    lines.push(`Ошибок разбора HTML: ${parseErr}.`);
+  }
+  if (gapPaused) {
+    lines.push("После жары очередь дыр отключили — шли только дальше по каталогу.");
+  }
+  if (scrapeSec > 0 && chunkOk > 0 && scrapeSec / chunkOk > 30) {
+    lines.push("Много времени на одну цену — похоже, съели паузы/отказы, не сами запросы.");
+  }
+  if (retryAttempted > 0) {
+    if (retryFail > retryOk) {
+      lines.push(`Повтор ошибок слабый: ${retryOk} ок / ${retryFail} снова мимо.`);
+    } else if (retryOk > 0) {
+      lines.push(`Повтор ошибок подтянул ещё ${retryOk} из ${retryAttempted}.`);
+    }
+  }
+  if (tags.length && conclusion !== "cancelled") {
+    const top = tags.map(([k, v]) => `${tagRu(k)} ×${v}`).join("; ");
+    lines.push(`Топ меток: ${top}.`);
+  }
+
+  if (!lines.length) lines.push("Заметных проблем по сводке не видно.");
+  return lines;
+}
+
 function buildReportText() {
   const catalog = readIngestArtifact("catalog") || {};
   const retry = readIngestArtifact("retry") || {};
@@ -32,21 +189,12 @@ function buildReportText() {
   const conclusion = process.env.JOB_CONCLUSION || "unknown";
   const runUrl = process.env.GITHUB_RUN_URL || "";
   const event = process.env.GITHUB_EVENT_NAME || "";
-  const statusRu =
-    conclusion === "success"
-      ? "OK"
-      : conclusion === "failure"
-        ? "ОШИБКА"
-        : conclusion === "cancelled"
-          ? "отменён"
-          : conclusion;
 
-  // Честный % этого окна: цены / запросы (не путать с месячным successPct).
   const chunkDone = Number(catalog.chunkDone) || 0;
   const chunkOk = Number(catalog.chunkOkWithPrices) || 0;
   const chunkPct =
     catalog.chunkSuccessPct != null
-      ? catalog.chunkSuccessPct
+      ? Number(catalog.chunkSuccessPct)
       : chunkDone > 0
         ? Math.round((chunkOk / chunkDone) * 1000) / 10
         : null;
@@ -63,19 +211,34 @@ function buildReportText() {
         ? Math.round((3600 / secPerOk) * 10) / 10
         : null;
 
+  const circle = statusCircle(conclusion, chunkPct);
+  const when = formatReportDateRu(new Date());
+  const analysis = buildAnalysis({
+    conclusion,
+    catalog,
+    retry,
+    chunkPct,
+    chunkDone,
+    chunkOk,
+  });
+
   const lines = [
-    `BrickLink парсер — прогон ${statusRu}`,
-    `Месяц: ${n(kpi.periodId || catalog.periodId)} · событие: ${n(event)}`,
+    `${circle} BrickLink парсер — ${statusRu(conclusion)}`,
+    when,
+    `Месяц: ${n(kpi.periodId || catalog.periodId)} · ${eventRu(event)}`,
     "",
     "Каталог (этот прогон):",
     `• запросов: ${n(catalog.chunkDone)}`,
     `• с ценами: ${n(catalog.chunkOkWithPrices)}`,
     `• без данных: ${n(catalog.chunkNoData)}`,
-    `• успех: ${n(chunkPct)}%`,
+    `• успех: ${chunkPct != null ? `${chunkPct}%` : "—"}`,
     `• на 1 цену: ${formatSecPerOk(secPerOk)}${okPerHour != null ? ` (~${n(okPerHour)} цен/час)` : ""}`,
     "",
     "Повтор ошибок:",
     `• попыток: ${n(retry.attempted)} · OK ${n(retry.chunkOk)} · fail ${n(retry.chunkFail)}`,
+    "",
+    "Что произошло:",
+    ...analysis.map((s) => `• ${s}`),
     "",
     "Покрытие (наборы+минифиги):",
     `• с ценами: ${n(kpi.freshOkPrimary)} из ${n(kpi.catalogPrimary)} (${n(kpi.pricedPctPrimary)}%)`,
@@ -166,7 +329,17 @@ async function main() {
   }
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(0);
-});
+module.exports = {
+  buildReportText,
+  formatReportDateRu,
+  statusCircle,
+  buildAnalysis,
+  formatSecPerOk,
+};
+
+if (require.main === module) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(0);
+  });
+}
