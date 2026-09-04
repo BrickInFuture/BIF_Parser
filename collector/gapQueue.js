@@ -97,6 +97,19 @@ function scoreGapTask(cat, slots, currentPeriodId, coverage, nowMs = Date.now())
   const currentUtcGap = gaps.some((g) => g.periodId === currentUtc);
   const recentClosedGap = gaps.some((g) => g.periodId === lastClosed);
   const currentGap = gaps.some((g) => g.periodId === currentPeriodId);
+  // Уже есть свежая цена на родителе (KPI coverage), а в очереди только старые дыры:
+  // сильно вниз — иначе залпы по 60 крутят одних и тех же, % покрытия стоит.
+  const alreadyFresh =
+    coverage?.coverageWouldSkip === true ||
+    coverage?.reason === "ledger_gap_override";
+  if (alreadyFresh) {
+    score -= 4500;
+    if (currentUtcGap) score += 900;
+    else if (recentClosedGap) score += 600;
+    else if (currentGap) score += 300;
+    score += Math.min(gaps.length, 6) * 20;
+    return score;
+  }
   if (currentUtcGap) score += 2200;
   else if (recentClosedGap) score += 2000;
   else if (currentGap) score += 1200;
@@ -155,10 +168,29 @@ async function fetchGapQueue(db, admin, opts) {
 
         let coverage;
         if (blFillableGap) {
-          coverage = { skip: false, reason: "ledger_gap", cohort: "mature" };
+          // Реальная политика покрытия нужна для скоринга: иначе «уже свежие»
+          // с дырами в 2018 уезжают в начало очереди и % KPI не растёт.
+          const realCoverage = await resolveCatalogCoverage(db, cat, currentPeriodId, {
+            nowMs,
+          });
+          if (realCoverage.skip) {
+            coverage = {
+              ...realCoverage,
+              skip: false,
+              reason: "ledger_gap_override",
+              coverageWouldSkip: true,
+            };
+          } else {
+            coverage = {
+              ...realCoverage,
+              reason: realCoverage.reason || "ledger_gap",
+              coverageWouldSkip: false,
+            };
+          }
         } else {
           coverage = await resolveCatalogCoverage(db, cat, currentPeriodId, { nowMs });
           if (coverage.skip) continue;
+          coverage = { ...coverage, coverageWouldSkip: false };
         }
 
         candidates.push({

@@ -146,9 +146,12 @@ function buildAnalysis({ conclusion, catalog, retry, chunkPct, chunkDone, chunkO
     catalog.stopRequested === true ||
     (Number(catalog.circuitTrips) > 0 && conclusion === "success" && chunkDone > 0 && chunkDone < 60);
   const trips = Number(catalog.circuitTrips) || 0;
-  const tags = topErrorTags(catalog.errorTagCounts);
-  const soft = Number(catalog.errorTagCounts?.soft_blocked) || 0;
-  const parseErr = Number(catalog.errorTagCounts?.parse_error) || 0;
+  // Только метки ЭТОГО залпа. Накопление за месяц (errorTagCounts) в «Что произошло» не тащим —
+  // иначе после удачного окна 60/60 снова светятся старые «сайт режет ×417».
+  const windowTags = catalog.chunkErrorTagCounts || {};
+  const tags = topErrorTags(windowTags);
+  const soft = Number(windowTags.soft_blocked) || 0;
+  const parseErr = Number(windowTags.parse_error) || 0;
   const gapPaused = catalog.gapPausedAfterHot === true;
   const scrapeSec = Number(catalog.scrapeElapsedSec) || 0;
   const retryFail = Number(retry.chunkFail) || 0;
@@ -273,13 +276,21 @@ function buildReportText() {
     ...analysis.map((s) => `• ${s}`),
     "",
     `Покрытие ${coverMark} (наборы+минифиги, цель ≥${COVERAGE_PCT_TARGET}%):`,
-    `• с ценами: ${n(kpi.freshOkPrimary)} из ${n(kpi.catalogPrimary)} (${pricedPct != null ? `${pricedPct}%` : "—"})`,
+    `• уникальных с ценами (за 28 дн.): ${n(kpi.freshOkPrimary)} из ${n(kpi.catalogPrimary)} (${pricedPct != null ? `${pricedPct}%` : "—"})`,
+    `• съёмов с ценами за месяц: ${n(kpi.runOkWithPrices != null ? kpi.runOkWithPrices : kpi.runOk)}`,
     `• в день: ${n(kpi.okPerDayWithPrices)} (цель >${n(kpi.okPerDayTarget != null ? kpi.okPerDayTarget : 2000)})`,
     `• успех за месяц: ${n(kpi.runSuccessPct)}% (цель >${SUCCESS_PCT_TARGET}%; ok ${n(kpi.runOk)} / fail ${n(kpi.runFail)})`,
     `• очередь ошибок: ${n(kpi.errorBacklogPrimary)}`,
   ];
   if (pricedPct != null && pricedPct < 50) {
     lines.push("• 🚨 покрытие ниже 50% — критично, каталог почти без свежих цен");
+  }
+  const monthPriced = Number(kpi.runOkWithPrices != null ? kpi.runOkWithPrices : kpi.runOk) || 0;
+  const freshN = Number(kpi.freshOkPrimary) || 0;
+  if (chunkOk >= 30 && monthPriced > freshN + 200) {
+    lines.push(
+      "• залпы пишут цены, но уникальных почти не прибывает — часто повтор уже покрытых (дыры в старых месяцах)"
+    );
   }
   if (runUrl) {
     lines.push("", `Лог: ${runUrl}`);

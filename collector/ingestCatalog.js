@@ -43,6 +43,7 @@ const {
 const { writeObservationFromParse, writeRrpBootstrapObservation } = require("./observationWriter");
 const { utcYearMonth } = require("./gapLedger");
 const { observationDocId, pickCatalogLaunchMs, pickCatalogRrpUsd } = require("./catalogFields");
+const { saveBrickLinkHttpAuth } = require("./httpAuthStore");
 const { loadOrCreateRun, patchRun, runDocId } = require("./checkpoint");
 const {
   PRIMARY_TYPES,
@@ -344,7 +345,9 @@ async function main() {
   let noData = RESET_RUN ? 0 : Number(run.data.noData) || 0;
   // Breaks "fail" down by cause (blocked / timeout / partial_prices / …) so reports don't
   // lump "site blocked us" together with "our price-reading rule failed".
+  // errorTagCounts = накопительно за месяц; chunkErrorTagCounts = только этот залп (для телеги).
   let errorTagCounts = RESET_RUN ? {} : { ...(run.data.errorTagCounts || {}) };
+  let chunkErrorTagCounts = {};
   let timingStats = RESET_RUN
     ? { okCount: 0, okTotalMs: 0, softCount: 0, softTotalMs: 0 }
     : {
@@ -504,6 +507,7 @@ async function main() {
   function noteErrorTag(tag) {
     const key = tag || "unknown";
     errorTagCounts[key] = (errorTagCounts[key] || 0) + 1;
+    chunkErrorTagCounts[key] = (chunkErrorTagCounts[key] || 0) + 1;
   }
 
   function noteTiming(scrape) {
@@ -687,6 +691,17 @@ async function main() {
         Math.max(gapBudget * 25, 500)
       ),
     ]);
+    try {
+      if (session.httpCookieHeader) {
+        await saveBrickLinkHttpAuth(db, FieldValue, {
+          cookieHeader: session.httpCookieHeader,
+          userAgent: session.httpUserAgent || null,
+          source: "ingest_catalog",
+        });
+      }
+    } catch (authErr) {
+      console.warn("http_auth_save_failed", authErr && authErr.message ? authErr.message : authErr);
+    }
     pendingItems = initialGapItems;
     deadlineMs = Date.now() + MAX_MINUTES * 60 * 1000;
     scrapeStartedMs = Date.now();
@@ -739,6 +754,7 @@ async function main() {
         fail,
         skipped,
         errorTagCounts,
+        chunkErrorTagCounts,
         circuitTrips: session.circuitTrips || 0,
         circuitOpen: session.isCircuitOpen(),
         circuitOpenThisWindow,
@@ -1204,6 +1220,7 @@ async function main() {
     secPerOkWithPrices,
     okPerHour,
     errorTagCounts,
+    chunkErrorTagCounts,
     timingStats,
     avgSecOk,
     avgSecSoft,
