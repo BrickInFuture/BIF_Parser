@@ -1,17 +1,16 @@
-# Internal collector вЂ” raw market observations only.
+# Internal collector — raw market observations only.
 # Needs secret FIREBASE_SERVICE_ACCOUNT_DEV.
 # Optional: TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID, BL_PROXY_URL.
 #
-# Schedule note: minutes 7 and 47 UTC (not :00/:40) вЂ” GitHub often delays/drops
-# jobs at the top of the hour under load. Days 1вЂ“26 UTC only.
+# Cron: minutes 5 and 45 UTC (~every 40 min). Day-of-month NOT in cron
+# (that form never fired on this repo). Days 1-26 enforced in job "gate".
 
 name: BIF collector
 
 on:
   schedule:
-    # Two slots/hour (~every 40 min). Days 1-26 UTC.
-    - cron: "7 * 1-26 * *"
-    - cron: "47 * 1-26 * *"
+    - cron: "5 * * * *"
+    - cron: "45 * * * *"
   workflow_dispatch:
     inputs:
       limit:
@@ -28,7 +27,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.check.outputs.go }}
+    steps:
+      - name: Days 1-26 UTC for schedule
+        id: check
+        run: |
+          d=$(date -u +%d)
+          d=$((10#$d))
+          echo "UTC day=$d event=${{ github.event_name }}"
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$d" -gt 26 ]; then
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            echo "Schedule idle after day 26"
+          else
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          fi
+
   ingest:
+    needs: gate
+    if: needs.gate.outputs.go == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -38,7 +57,6 @@ jobs:
       BL_PAUSE_MS: "400,800"
       BL_SOFT_BLOCK_FAST_MS: "3000"
       BL_CIRCUIT_SOFT_LIMIT: "5"
-      # After 5 soft blocks вЂ” stop window (no long cool). Next burst ~40 min later.
       BL_CIRCUIT_STOP: "1"
       BL_CIRCUIT_COOL_MIN_MS: "60000"
       BL_CIRCUIT_COOL_MAX_MS: "120000"
