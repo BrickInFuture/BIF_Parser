@@ -205,13 +205,177 @@ function aggFromStructuredBlock(block) {
   return agg;
 }
 
+/** market cell that is just "Unavailable" (no Times Sold / Total Lots table). */
+function cellLooksUnavailable(text) {
+  const t = cleanCellText(text);
+  if (!t) return false;
+  if (/Times\s*Sold|Total\s*Lots/i.test(t)) return false;
+  return /^unavailable$/i.test(t) || /^n\/?a$/i.test(t);
+}
+
+/**
+ * Parse one summary-grid <td>: sold block, stock block, or empty/Unavailable.
+ * Real catalogPG layout is four columns: sold New | sold Used | stock New | stock Used.
+ */
+function aggFromSummaryCellHtml(cellHtml) {
+  const html = String(cellHtml || "");
+  const plain = toPlainText(html);
+  if (cellLooksUnavailable(plain)) {
+    return { kind: null, agg: emptyAgg(), unavailable: true };
+  }
+  let rows = [];
+  try {
+    rows = extractStructuredRows(html);
+  } catch (e) {
+    rows = [];
+  }
+  const blocks = groupRowsIntoBlocks(rows);
+  const sold = blocks.filter((b) => b.headerKey === "timesSold").map(aggFromStructuredBlock);
+  const stock = blocks.filter((b) => b.headerKey === "totalLots").map(aggFromStructuredBlock);
+  if (sold[0] && (hasUsefulAgg(sold[0]) || hasExplicitNoPriceCount(sold[0]) || (sold[0].count || 0) > 0)) {
+    return { kind: "sold", agg: sold[0], unavailable: false };
+  }
+  if (stock[0] && (hasUsefulAgg(stock[0]) || hasExplicitNoPriceCount(stock[0]) || (stock[0].count || 0) > 0)) {
+    return { kind: "stock", agg: stock[0], unavailable: false };
+  }
+  const { soldBlocks, stockBlocks } = extractAggBlocks(html);
+  if (soldBlocks[0]) {
+    const agg = parseStatsBlock(soldBlocks[0]);
+    if (hasUsefulAgg(agg) || (agg.count || 0) > 0) return { kind: "sold", agg, unavailable: false };
+  }
+  if (stockBlocks[0]) {
+    const agg = parseStatsBlock(stockBlocks[0]);
+    if (hasUsefulAgg(agg) || (agg.count || 0) > 0) return { kind: "stock", agg, unavailable: false };
+  }
+  return { kind: null, agg: emptyAgg(), unavailable: false };
+}
+
+/**
+ * Prefer column position over "first Times Sold = New". When New sold is Unavailable,
+ * market omits that Times Sold table — positional [0]/[1] would wrongly put Used into soldNew.
+ */
+function parseSummaryQuadColumns(html) {
+  let $;
+  try {
+    $ = cheerio.load(String(html || ""));
+  } catch (e) {
+    return null;
+  }
+
+  let headerTr = null;
+  $("tr").each((_, tr) => {
+    const tds = $(tr).children("td");
+    if (tds.length !== 4) return;
+    const labels = [];
+    tds.each((__, td) => {
+      labels.push(cleanCellText($(td).text()).replace(/\s+/g, " "));
+    });
+    const isNew = (s) => /^new$/i.test(String(s || "").trim());
+    const isUsed = (s) => /^used$/i.test(String(s || "").trim());
+    if (isNew(labels[0]) && isUsed(labels[1]) && isNew(labels[2]) && isUsed(labels[3])) {
+      headerTr = tr;
+      return false;
+    }
+  });
+  if (!headerTr) return null;
+
+  const dataTr = $(headerTr)
+    .nextAll("tr")
+    .filter((_, tr) => $(tr).children("td").length === 4)
+    .first();
+  if (!dataTr.length) return null;
+
+  const cells = dataTr.children("td");
+  if (cells.length < 4) return null;
+
+  const parsed = [0, 1, 2, 3].map((i) => {
+    const td = cells.eq(i);
+    return aggFromSummaryCellHtml($.html(td));
+  });
+
+  const soldNew = parsed[0].kind === "sold" ? parsed[0].agg : emptyAgg();
+  const soldUsed = parsed[1].kind === "sold" ? parsed[1].agg : emptyAgg();
+  const stockNew = parsed[2].kind === "stock" ? parsed[2].agg : emptyAgg();
+  const stockUsed = parsed[3].kind === "stock" ? parsed[3].agg : emptyAgg();
+
+  if (
+    !hasUsefulAgg(soldNew) &&
+    !hasUsefulAgg(soldUsed) &&
+    !hasUsefulAgg(stockNew) &&
+    !hasUsefulAgg(stockUsed) &&
+    !hasExplicitNoPriceCount(soldNew) &&
+    !hasExplicitNoPriceCount(soldUsed) &&
+    !hasExplicitNoPriceCount(stockNew) &&
+    !hasExplicitNoPriceCount(stockUsed) &&
+    !(parsed[0].unavailable || parsed[1].unavailable)
+  ) {
+    return null;
+  }
+
+  return { soldNew, soldUsed, stockNew, stockUsed, via: "quad_columns" };
+}
+
+/**
+ * Map ordered sold/stock blocks to New/Used without assuming a missing New column
+ * still occupies index 0. When the sales half shows Unavailable before the only
+ * Times Sold block, that block is Used.
+ */
+function mapSoldStockBlocksToSides(soldBlocks, stockBlocks, contextHtml) {
+  const ctx = String(contextHtml || "");
+  const sold = (soldBlocks || []).map((b) => (typeof b === "string" ? parseStatsBlock(b) : b));
+  const stock = (stockBlocks || []).map((b) => (typeof b === "string" ? parseStatsBlock(b) : b));
+
+  let soldNew = emptyAgg();
+  let soldUsed = emptyAgg();
+  const usedSoldFirst = /Unavailable[\s\S]{0,2500}?Times\s*Sold/i.test(ctx);
+  if (sold.length >= 2) {
+    if (usedSoldFirst) {
+      // New column missing: first Times Sold is Used; do not treat [0] as New.
+      soldUsed = sold[0] || emptyAgg();
+      soldNew = emptyAgg();
+    } else {
+      soldNew = sold[0] || emptyAgg();
+      soldUsed = sold[1] || emptyAgg();
+    }
+  } else if (sold.length === 1) {
+    const only = sold[0] || emptyAgg();
+    if (usedSoldFirst) soldUsed = only;
+    else soldNew = only;
+  }
+
+  let stockNew = emptyAgg();
+  let stockUsed = emptyAgg();
+  if (stock.length >= 2) {
+    stockNew = stock[0] || emptyAgg();
+    stockUsed = stock[1] || emptyAgg();
+  } else if (stock.length === 1) {
+    const only = stock[0] || emptyAgg();
+    const usedOnlyStock =
+      /Current\s*Items\s*for\s*Sale[\s\S]{0,4000}?Unavailable[\s\S]{0,2500}?Total\s*Lots/i.test(ctx);
+    if (usedOnlyStock) stockUsed = only;
+    else stockNew = only;
+  }
+
+  return { soldNew, soldUsed, stockNew, stockUsed };
+}
+
 /**
  * Structured sold/stock aggregates for the whole page, or null if the page has no
  * table-based summary rows at all (falls back to the legacy plaintext approach).
- * Only the first New/Used pair per section is used — matches the page's fixed layout
- * (summary section first, any monthly detail tables further down are simply ignored).
+ * Prefers the fixed 4-column New/Used grid; falls back to block order with
+ * Unavailable-aware remapping when a side is missing.
  */
 function parseStructuredSummary(html) {
+  const quad = parseSummaryQuadColumns(html);
+  if (quad) {
+    return {
+      soldNew: quad.soldNew,
+      soldUsed: quad.soldUsed,
+      stockNew: quad.stockNew,
+      stockUsed: quad.stockUsed,
+    };
+  }
+
   let rows;
   try {
     rows = extractStructuredRows(html);
@@ -225,12 +389,28 @@ function parseStructuredSummary(html) {
   const stockBlocks = blocks.filter((b) => b.headerKey === "totalLots").map(aggFromStructuredBlock);
   if (!soldBlocks.length && !stockBlocks.length) return null;
 
-  return {
-    soldNew: soldBlocks[0] || emptyAgg(),
-    soldUsed: soldBlocks[1] || emptyAgg(),
-    stockNew: stockBlocks[0] || emptyAgg(),
-    stockUsed: stockBlocks[1] || emptyAgg(),
-  };
+  // Summary tables come first; monthly detail Times Sold further down must not shift indices.
+  // Take at most the first two sold + first two stock from the page start (summary zone).
+  const summaryHtml = extractSummaryHtml(html) || html;
+  let summaryRows;
+  try {
+    summaryRows = extractStructuredRows(summaryHtml);
+  } catch (e) {
+    summaryRows = rows;
+  }
+  const summaryBlocks = groupRowsIntoBlocks(summaryRows);
+  const summarySold = summaryBlocks
+    .filter((b) => b.headerKey === "timesSold")
+    .map(aggFromStructuredBlock)
+    .slice(0, 2);
+  const summaryStock = summaryBlocks
+    .filter((b) => b.headerKey === "totalLots")
+    .map(aggFromStructuredBlock)
+    .slice(0, 2);
+  const useSold = summarySold.length ? summarySold : soldBlocks.slice(0, 2);
+  const useStock = summaryStock.length ? summaryStock : stockBlocks.slice(0, 2);
+
+  return mapSoldStockBlocksToSides(useSold, useStock, summaryHtml);
 }
 
 /** Prefer whichever parse (structured vs legacy plaintext) actually found usable data. */
@@ -406,11 +586,11 @@ function extractSummaryHtml(raw) {
     return String(raw).slice(alt, alt + 20000);
   }
   const after = String(raw).slice(start);
-  const monthCut = after.search(
-    /\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+20\d{2}\b/i
-  );
-  // Only cut on month headers that appear after the summary tables (avoid early false cuts).
-  if (monthCut > 1500) return after.slice(0, monthCut);
+  // Cut before the first real month header ("July 2026" / "July&nbsp;2026").
+  // Always cut when found — including short fixtures — so monthly Times Sold
+  // never shift summary New/Used indices (Used-only + later months looked like New+Used).
+  const monthCut = after.search(MONTH_HEADER_RE);
+  if (monthCut >= 0) return after.slice(0, monthCut);
   return after.slice(0, 20000);
 }
 
@@ -452,6 +632,7 @@ function parseStatsFromMonthCell(cellHtml) {
   const tail = hrPos >= 0 ? cell.slice(hrPos) : cell;
   const structured = parseStructuredSummary(tail);
   if (structured && hasUsefulAgg(structured.soldNew)) return structured.soldNew;
+  if (structured && hasUsefulAgg(structured.soldUsed)) return structured.soldUsed;
   const { soldBlocks } = extractAggBlocks(tail);
   if (soldBlocks[0]) return parseStatsBlock(soldBlocks[0]);
   const plain = parseStatsBlock(toPlainText(tail));
@@ -470,14 +651,55 @@ function findMonthCellHtml(raw, headerIndex) {
   return raw.slice(start, headerIndex + relEnd + 5);
 }
 
-function mergeMonthSide(row, agg) {
+/**
+ * @param {"new"|"used"|null} sideHint — when known (column on live BL), write that side only.
+ */
+function mergeMonthSide(row, agg, sideHint = null) {
   if (!hasUsefulAgg(agg) && !hasExplicitNoPriceCount(agg)) return row;
+  if (sideHint === "used") {
+    if (!rowHasSoldSignal({ soldNew: emptyAgg(), soldUsed: row.soldUsed })) row.soldUsed = agg;
+    return row;
+  }
+  if (sideHint === "new") {
+    if (!rowHasSoldSignal({ soldNew: row.soldNew, soldUsed: emptyAgg() })) row.soldNew = agg;
+    return row;
+  }
+  // Legacy fixtures: first lone block → New, second → Used.
   if (!rowHasSoldSignal({ soldNew: row.soldNew, soldUsed: emptyAgg() })) {
     row.soldNew = agg;
   } else if (!rowHasSoldSignal({ soldNew: emptyAgg(), soldUsed: row.soldUsed })) {
     row.soldUsed = agg;
   }
   return row;
+}
+
+/**
+ * Live catalogPG monthly history sits in two vertical columns under the summary:
+ * left TD = New, next TD = Used. Return which side owns this month-header match.
+ * @returns {"new"|"used"|null}
+ */
+function monthlySideForMatch(raw, matchIndex) {
+  const html = String(raw || "");
+  if (matchIndex == null || matchIndex < 0 || matchIndex >= html.length) return null;
+
+  // Live BL monthly history: TR with four WIDTH="25%" columns (New | Used | …).
+  // Only trust that layout — random valign=top TDs in fixtures must not force a side.
+  const before = html.slice(Math.max(0, matchIndex - 12000), matchIndex);
+  const colTds = [...before.matchAll(/<td\b[^>]*width\s*=\s*["']?25%["']?[^>]*>/gi)];
+  if (colTds.length < 1) return null;
+
+  const last = colTds[colTds.length - 1][0];
+  const lastIdx = before.lastIndexOf(last);
+  if (lastIdx < 0) return null;
+  const absOpen = matchIndex - (before.length - lastIdx);
+  const trStart = html.lastIndexOf("<tr", absOpen);
+  if (trStart < 0) return null;
+  const between = html.slice(trStart, absOpen + last.length);
+  const colsInTr = [...between.matchAll(/<td\b[^>]*width\s*=\s*["']?25%["']?[^>]*>/gi)];
+  const colIndex = Math.max(0, colsInTr.length - 1);
+  if (colIndex === 0) return "new";
+  if (colIndex === 1) return "used";
+  return null;
 }
 
 function monthSectionIsEmpty(soldNew, soldUsed) {
@@ -503,16 +725,41 @@ function monthlyDetailStartIndex(raw) {
   return abs;
 }
 
-function parseMonthlySoldChunk(chunkHtml) {
+function parseMonthlySoldChunk(chunkHtml, sideHint = null) {
   const chunk = String(chunkHtml || "");
+  const { soldBlocks } = extractAggBlocks(chunk);
+  const aggs = soldBlocks.map((b) => parseStatsBlock(b));
+  const unavailableThenSold = /Unavailable[\s\S]{0,2500}?Times\s*Sold/i.test(chunk);
+
+  // New cell empty marker before the only stats block → Used (never New).
+  if (unavailableThenSold && aggs.length >= 1) {
+    return { soldNew: emptyAgg(), soldUsed: aggs[0] || emptyAgg() };
+  }
+
+  // Known column (live BL): every Times Sold in this chunk belongs to that side.
+  if (sideHint === "new" || sideHint === "used") {
+    const first =
+      aggs.find((a) => hasUsefulAgg(a) || hasExplicitNoPriceCount(a)) || emptyAgg();
+    return sideHint === "new"
+      ? { soldNew: first, soldUsed: emptyAgg() }
+      : { soldNew: emptyAgg(), soldUsed: first };
+  }
+
+  if (aggs.length >= 2) {
+    return {
+      soldNew: aggs[0] || emptyAgg(),
+      soldUsed: aggs[1] || emptyAgg(),
+    };
+  }
+
   const structured = parseStructuredSummary(chunk);
   if (structured && (hasUsefulAgg(structured.soldNew) || hasUsefulAgg(structured.soldUsed))) {
     return { soldNew: structured.soldNew, soldUsed: structured.soldUsed };
   }
-  const { soldBlocks } = extractAggBlocks(chunk);
+
   return {
-    soldNew: soldBlocks[0] ? parseStatsBlock(soldBlocks[0]) : emptyAgg(),
-    soldUsed: soldBlocks[1] ? parseStatsBlock(soldBlocks[1]) : emptyAgg(),
+    soldNew: aggs[0] || emptyAgg(),
+    soldUsed: emptyAgg(),
   };
 }
 
@@ -533,7 +780,8 @@ function parseMonthlySoldSections(html, opts = {}) {
 
     const end = i + 1 < matches.length ? matches[i + 1].index : Math.min(raw.length, m.index + 12000);
     const chunk = raw.slice(m.index, end);
-    const sides = parseMonthlySoldChunk(chunk);
+    const sideHint = monthlySideForMatch(raw, m.index);
+    const sides = parseMonthlySoldChunk(chunk, sideHint);
 
     let row = byPeriod.get(periodId);
     if (!row) {
@@ -544,19 +792,21 @@ function parseMonthlySoldSections(html, opts = {}) {
     const pairInChunk =
       (hasUsefulAgg(sides.soldNew) || hasExplicitNoPriceCount(sides.soldNew)) &&
       (hasUsefulAgg(sides.soldUsed) || hasExplicitNoPriceCount(sides.soldUsed));
-    if (pairInChunk) {
+    if (pairInChunk && !sideHint) {
       row.soldNew = sides.soldNew;
       row.soldUsed = sides.soldUsed;
       continue;
     }
 
     if (hasUsefulAgg(sides.soldNew) || hasExplicitNoPriceCount(sides.soldNew)) {
-      mergeMonthSide(row, sides.soldNew);
+      mergeMonthSide(row, sides.soldNew, sideHint || "new");
     } else if (hasUsefulAgg(sides.soldUsed) || hasExplicitNoPriceCount(sides.soldUsed)) {
-      mergeMonthSide(row, sides.soldUsed);
+      mergeMonthSide(row, sides.soldUsed, sideHint || "used");
     } else {
       const single = parseStatsFromMonthCell(chunk);
-      if (hasUsefulAgg(single) || hasExplicitNoPriceCount(single)) mergeMonthSide(row, single);
+      if (hasUsefulAgg(single) || hasExplicitNoPriceCount(single)) {
+        mergeMonthSide(row, single, sideHint);
+      }
     }
   }
 
@@ -615,11 +865,12 @@ function extractAggBlocks(summary) {
   };
 }
 
-function applyAggBlocks(result, soldBlocks, stockBlocks) {
-  if (soldBlocks[0]) result.soldNew = parseStatsBlock(soldBlocks[0]);
-  if (soldBlocks[1]) result.soldUsed = parseStatsBlock(soldBlocks[1]);
-  if (stockBlocks[0]) result.stockNew = parseStatsBlock(stockBlocks[0]);
-  if (stockBlocks[1]) result.stockUsed = parseStatsBlock(stockBlocks[1]);
+function applyAggBlocks(result, soldBlocks, stockBlocks, contextHtml) {
+  const mapped = mapSoldStockBlocksToSides(soldBlocks, stockBlocks, contextHtml);
+  result.soldNew = mapped.soldNew;
+  result.soldUsed = mapped.soldUsed;
+  result.stockNew = mapped.stockNew;
+  result.stockUsed = mapped.stockUsed;
 }
 
 /**
@@ -668,7 +919,7 @@ function parseCatalogPgHtml(html) {
   const summary = extractSummaryHtml(raw);
   if (summary) {
     const { soldBlocks, stockBlocks } = extractAggBlocks(summary);
-    applyAggBlocks(result, soldBlocks, stockBlocks);
+    applyAggBlocks(result, soldBlocks, stockBlocks, summary);
   }
 
   // Structural (DOM-based) pass second: fixes cases where the legacy text-window regex
@@ -770,6 +1021,9 @@ module.exports = {
   groupRowsIntoBlocks,
   aggFromStructuredBlock,
   parseStructuredSummary,
+  parseSummaryQuadColumns,
+  mapSoldStockBlocksToSides,
+  monthlySideForMatch,
   pickBetterAgg,
   isExplicitNoPricePlaceholder,
   hasExplicitNoPriceCount,
