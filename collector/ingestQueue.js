@@ -20,6 +20,7 @@ const { writeObservationFromParse, writeRrpBootstrapObservation } = require("./o
 const { resolveMarketFetch } = require("./blUrls");
 const { pickCatalogRrpUsd, pickCatalogLaunchMs } = require("./catalogFields");
 const { classifyCoverage } = require("./coveragePolicy");
+const { saveHttpAuth } = require("./httpAuthStore");
 
 function flagValue(name, fallback = null) {
   const prefix = `--${name}=`;
@@ -411,6 +412,18 @@ async function main() {
 
   try {
     await session.warmUp();
+
+    try {
+      if (session.httpCookieHeader) {
+        await saveHttpAuth(db, FieldValue, {
+          cookieHeader: session.httpCookieHeader,
+          userAgent: session.httpUserAgent || null,
+          source: ITEM_ID ? "ingest_queue_item" : "ingest_queue",
+        });
+      }
+    } catch (authErr) {
+      console.warn("http_auth_save_failed", authErr && authErr.message ? authErr.message : authErr);
+    }
 
     for (const req of pending) {
       if (Date.now() >= deadlineMs) {

@@ -392,7 +392,8 @@ class CollectorSession {
       waitUntil: "domcontentloaded",
       timeout: this.timeoutMs,
     });
-    await sleep(1000 + Math.floor(Math.random() * 700));
+    const warmExtra = Math.max(0, Number(process.env.BL_WARMUP_EXTRA_MS || 1000) || 1000);
+    await sleep(warmExtra + Math.floor(Math.random() * Math.min(400, warmExtra || 1)));
     this.warmed = true;
     await this.#syncHttpAuth();
   }

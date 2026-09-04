@@ -13,6 +13,10 @@ on:
     - cron: "10 * * * *"
   workflow_dispatch:
     inputs:
+      reason:
+        description: "schedule = автопинк; owner = вручную (ты / агент)"
+        required: false
+        default: "owner"
       limit:
         description: "Max items per short burst (SET+MINIFIG); stay under IP heat (~60)"
         required: false
@@ -130,4 +134,5 @@ jobs:
           JOB_CONCLUSION: ${{ job.status }}
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
+          BL_RUN_REASON: ${{ github.event.inputs.reason || '' }}
         run: node collector/notifyIngestReport.js

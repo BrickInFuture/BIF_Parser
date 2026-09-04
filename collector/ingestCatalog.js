@@ -43,7 +43,7 @@ const {
 const { writeObservationFromParse, writeRrpBootstrapObservation } = require("./observationWriter");
 const { utcYearMonth } = require("./gapLedger");
 const { observationDocId, pickCatalogLaunchMs, pickCatalogRrpUsd } = require("./catalogFields");
-const { saveBrickLinkHttpAuth } = require("./httpAuthStore");
+const { saveHttpAuth } = require("./httpAuthStore");
 const { loadOrCreateRun, patchRun, runDocId } = require("./checkpoint");
 const {
   PRIMARY_TYPES,
@@ -693,7 +693,7 @@ async function main() {
     ]);
     try {
       if (session.httpCookieHeader) {
-        await saveBrickLinkHttpAuth(db, FieldValue, {
+        await saveHttpAuth(db, FieldValue, {
           cookieHeader: session.httpCookieHeader,
           userAgent: session.httpUserAgent || null,
           source: "ingest_catalog",

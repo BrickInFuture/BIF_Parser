@@ -1,4 +1,4 @@
-# Internal collector — raw market observations only.
+# Internal collector вЂ” raw market observations only.
 # Needs secret FIREBASE_SERVICE_ACCOUNT_DEV.
 # Optional: TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID, BL_PROXY_URL.
 #
@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       reason:
-        description: "schedule = auto kick; owner = manual"
+        description: "schedule = Р°РІС‚РѕРїРёРЅРє; owner = РІСЂСѓС‡РЅСѓСЋ (С‚С‹ / Р°РіРµРЅС‚)"
         required: false
         default: "owner"
       limit:

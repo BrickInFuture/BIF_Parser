@@ -1,16 +1,16 @@
-﻿/**
- * РЎР«Р РћР™ РїСѓС‚СЊ (РїСѓР±Р»РёС‡РЅС‹Р№): Р·Р°РїРёСЃСЊ СЂС‹РЅРѕС‡РЅС‹С… С‚РѕС‡РµРє market РІ Firestore
- * Р‘Р•Р— СЂР°СЃС‡С‘С‚Р° РѕС†РµРЅРєРё BIF.
+/**
+ * СЫРОЙ путь (публичный): запись рыночных точек market в Firestore
+ * БЕЗ расчёта оценки BIF.
  *
- * РџРёС€РµС‚ С‚РѕР»СЊРєРѕ:
- *   market_observations/{id}__market                    вЂ” РїРѕСЃР»РµРґРЅРёР№ СЃРЅРёРјРѕРє
- *   market_observations/{id}__market/monthly/{YYYY-MM}  вЂ” РїРѕРјРµСЃСЏС‡РЅРѕ sold/stock
+ * Пишет только:
+ *   market_observations/{id}__market                    — последний снимок
+ *   market_observations/{id}__market/monthly/{YYYY-MM}  — помесячно sold/stock
  *
- * РћС†РµРЅРєСѓ BIF СЃС‡РёС‚Р°РµС‚ Р·Р°РєСЂС‹С‚Р°СЏ С‡Р°СЃС‚СЊ (functions/bifFromObservation.js):
- *   вЂў РІ РїСЂРёРІР°С‚РЅРѕРј/Р»РѕРєР°Р»СЊРЅРѕРј РїСЂРѕРіРѕРЅРµ вЂ” inline РїРѕСЃР»Рµ СЌС‚РѕР№ Р·Р°РїРёСЃРё (СЃРј. observationWriter.js);
- *   вЂў РІ РїСѓР±Р»РёС‡РЅРѕРј РїСЂРѕРіРѕРЅРµ (BL_RAW_ONLY=1) вЂ” Firestore-С‚СЂРёРіРіРµСЂ onMarketMonthlyWritten.
+ * Оценку BIF считает закрытая часть (functions/bifFromObservation.js):
+ *   • в приватном/локальном прогоне — inline после этой записи (см. observationWriter.js);
+ *   • в публичном прогоне (BL_RAW_ONLY=1) — Firestore-триггер onMarketMonthlyWritten.
  *
- * РЎРµРєСЂРµС‚РЅС‹С… РёРјРїРѕСЂС‚РѕРІ Р·РґРµСЃСЊ РЅРµС‚ вЂ” С„Р°Р№Р» РјРѕР¶РЅРѕ РІС‹РєР»Р°РґС‹РІР°С‚СЊ РІ РїСѓР±Р»РёС‡РЅС‹Р№ СЂРµРїРѕР·РёС‚РѕСЂРёР№.
+ * Секретных импортов здесь нет — файл можно выкладывать в публичный репозиторий.
  */
 "use strict";
 
@@ -29,20 +29,20 @@ function rowHasSoldSignal(row) {
   return aggregateHasSignal(row.soldNew) || aggregateHasSignal(row.soldUsed);
 }
 
-/** РћРґРЅР° СЃС‹СЂР°СЏ С‚РѕС‡РєР° (РѕС€РёР±РєР° / РїСѓСЃС‚РѕР№ СЂС‹РЅРѕРє / Р±РµР· РїРѕРјРµСЃСЏС‡РЅРѕР№ РґРµС‚Р°Р»РёР·Р°С†РёРё). */
+/** Одна сырая точка (ошибка / пустой рынок / без помесячной детализации). */
 async function writeRawSingle(db, adminFirestore, payload, opts, periodId) {
   const FieldValue = adminFirestore.FieldValue;
   const catalogItemId = String(payload.catalogItemId);
   const itemType = String(payload.itemType || "SET").toUpperCase();
   const parsed = payload.parsed || {};
-  const obsId = observationDocId(catalogItemId, "market");
+  const obsId = observationDocId(catalogItemId, "bricklink");
   const method = payload.method || "http_token_catalogPG";
 
   const point = buildMonthlyMarketPoint({
     catalogItemId,
     itemType,
     periodId,
-    source: "market",
+    source: "bricklink",
     method,
     scrapeStatus: parsed.ok ? (parsed.empty ? "no_data" : "ok") : "error",
     empty: !!parsed.empty,
@@ -93,10 +93,10 @@ async function writeRawSingle(db, adminFirestore, payload, opts, periodId) {
 }
 
 /**
- * Р—Р°РїРёСЃСЊ СЃС‹СЂС‹С… С‚РѕС‡РµРє РёР· СЂРµР·СѓР»СЊС‚Р°С‚Р° СЃРєСЂРµР№РїР°.
- * РњСѓР»СЊС‚РёРјРµСЃСЏС†: РІСЃРµ РїРѕРјРµСЃСЏС‡РЅС‹Рµ sold-Р±Р»РѕРєРё СЃРѕ СЃС‚СЂР°РЅРёС†С‹ Price Guide.
+ * Запись сырых точек из результата скрейпа.
+ * Мультимесяц: все помесячные sold-блоки со страницы Price Guide.
  * @param {FirebaseFirestore.Firestore} db
- * @param {object} adminFirestore admin.firestore (РґР»СЏ FieldValue)
+ * @param {object} adminFirestore admin.firestore (для FieldValue)
  * @param {{ catalogItemId: string, itemType?: string, setNo?: string, parsed: object, method?: string, errorTag?: string }} payload
  * @param {{ dryRun?: boolean }} [opts]
  */
@@ -105,7 +105,7 @@ async function writeRawObservationFromParse(db, adminFirestore, payload, opts = 
   const catalogItemId = String(payload.catalogItemId);
   const itemType = String(payload.itemType || "SET").toUpperCase();
   const parsed = payload.parsed || {};
-  const obsId = observationDocId(catalogItemId, "market");
+  const obsId = observationDocId(catalogItemId, "bricklink");
   const currentPeriodId = utcYearMonth();
   const method = payload.method || "http_token_catalogPG";
   const monthlySold = Array.isArray(parsed.monthlySold) ? parsed.monthlySold : null;
@@ -121,7 +121,7 @@ async function writeRawObservationFromParse(db, adminFirestore, payload, opts = 
       catalogItemId,
       itemType,
       periodId: row.periodId,
-      source: "market",
+      source: "bricklink",
       method,
       scrapeStatus: row.empty ? "no_data" : "ok",
       empty: !!row.empty,
@@ -138,8 +138,8 @@ async function writeRawObservationFromParse(db, adminFirestore, payload, opts = 
   const bifPeriodId = lastClosedUtcYearMonth();
   const snapshotPoint =
     points.find((p) => p.periodId === currentPeriodId) || points[points.length - 1];
-  // Parent snapshot is what GET /catalog uses for on-read estimateSide.
-  // Monthly rows only carry stock when the *current* month has no sold вЂ” so a
+  // Parent snapshot is what GET /catalog uses for the on-read card price.
+  // Monthly rows only carry stock when the *current* month has no sold — so a
   // Used-only closed month would leave New blank on the card. Always mirror the
   // Price Guide summary sold+stock onto the parent doc (6-month / live listings).
   const observation = {
@@ -203,8 +203,8 @@ async function writeRawObservationFromParse(db, adminFirestore, payload, opts = 
 }
 
 /**
- * РќРµС‚ РІС‚РѕСЂРёС‡РЅРѕРіРѕ СЂС‹РЅРєР° Сѓ РЅРѕРІРёРЅРєРё в†’ СЃС‹СЂРѕР№ РјР°СЂРєРµСЂ РјРµСЃСЏС†Р° (method=rrp_bootstrap_0_9)
- * СЃ СЃРѕС…СЂР°РЅС‘РЅРЅС‹Рј rrpUsdForBootstrap. РћС†РµРЅРєСѓ RRPГ—0.9 СЃС‡РёС‚Р°РµС‚ Р·Р°РєСЂС‹С‚Р°СЏ С‡Р°СЃС‚СЊ.
+ * Нет вторичного рынка у новинки → сырой маркер месяца (method=rrp_bootstrap_0_9)
+ * с сохранённым rrpUsdForBootstrap. Оценку RRP×0.9 считает закрытая часть.
  * @param {{ catalogItemId: string, itemType?: string, setNo?: string|null, rrpUsd: number, launchDateMs?: number|null }} payload
  */
 async function writeRawBootstrapMarker(db, adminFirestore, payload, opts = {}) {
@@ -216,14 +216,14 @@ async function writeRawBootstrapMarker(db, adminFirestore, payload, opts = {}) {
     return { dryRun: !!opts.dryRun, wrote: false, reason: "no_rrp" };
   }
 
-  const obsId = observationDocId(catalogItemId, "market");
+  const obsId = observationDocId(catalogItemId, "bricklink");
   const periodId = utcYearMonth();
 
   const point = buildMonthlyMarketPoint({
     catalogItemId,
     itemType,
     periodId,
-    source: "market",
+    source: "bricklink",
     method: RRP_BOOTSTRAP_METHOD,
     scrapeStatus: "no_data",
     empty: true,
@@ -248,4 +248,3 @@ module.exports = {
   writeRawObservationFromParse,
   writeRawBootstrapMarker,
 };
-

@@ -5,7 +5,7 @@
  *   TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID  — основной канал
  *   INGEST_NOTIFY_EMAIL (optional)         — копия на почту через FormSubmit
  *
- *   node scripts/bricklink-parser/notifyIngestReport.js
+ *   node collector/notifyIngestReport.js
  *
  * Как отличить запуск:
  *   GITHUB_EVENT_NAME=schedule              → по расписанию
@@ -182,7 +182,11 @@ function buildAnalysis({ conclusion, catalog, retry, chunkPct, chunkDone, chunkO
       lines.push(`Прогон оборвали после ${chunkDone} запросов (успели ${chunkOk} с ценами).`);
     }
   } else if (conclusion === "failure") {
-    lines.push("Прогон упал с ошибкой — смотри лог по ссылке.");
+    if (!chunkDone) {
+      lines.push("Залп не стартовал (сбой до запросов) — цифр этого окна нет.");
+    } else {
+      lines.push("Прогон упал с ошибкой после части запросов — смотри лог по ссылке.");
+    }
   } else if (timedOut) {
     lines.push("Время окна кончилось — не все запросы успели.");
   } else if (trips > 0 && (catalog.circuitOpen || circuitStop)) {
@@ -222,7 +226,7 @@ function buildAnalysis({ conclusion, catalog, retry, chunkPct, chunkDone, chunkO
   return lines;
 }
 
-function buildCoverageLines(kpi, chunkOk, pricedPct, coverMark) {
+function buildCoverageLines(kpi, chunkOk, pricedPct, coverMark, opts = {}) {
   const lines = [];
   const fresh = Number(kpi.freshOkPrimary);
   const catalog = Number(kpi.catalogPrimary);
@@ -235,10 +239,14 @@ function buildCoverageLines(kpi, chunkOk, pricedPct, coverMark) {
   const runOk = Number(kpi.runOk) || 0;
   const runFail = Number(kpi.runFail) || 0;
   const backlog = kpi.errorBacklogPrimary;
+  const burstDidNotRun = opts.burstDidNotRun === true;
 
   lines.push(
     `Каталог ${coverMark} — свежие цены (за ~28 дней, цель ≥${COVERAGE_PCT_TARGET}%):`
   );
+  if (burstDidNotRun) {
+    lines.push("• залп не писал цены — цифры ниже без изменений с прошлого успешного съёма");
+  }
   if (Number.isFinite(fresh) && Number.isFinite(catalog) && catalog > 0) {
     lines.push(
       `• сейчас с ценой: ${fresh} из ${catalog}${
@@ -273,11 +281,12 @@ function buildCoverageLines(kpi, chunkOk, pricedPct, coverMark) {
     lines.push(`• ждут повтора после ошибки: ${n(backlog)}`);
   }
 
-  if (pricedPct != null && pricedPct < 50) {
+  if (pricedPct != null && pricedPct < 50 && !burstDidNotRun) {
     lines.push("• 🚨 меньше половины каталога со свежей ценой — критично");
   }
 
   if (
+    !burstDidNotRun &&
     chunkOk >= 30 &&
     Number.isFinite(perDay) &&
     perDay < dayTarget * 0.75 &&
@@ -361,7 +370,12 @@ function buildReportText(env = process.env) {
   }
 
   lines.push("", "Что произошло:", ...analysis.map((s) => `• ${s}`));
-  lines.push("", ...buildCoverageLines(kpi, chunkOk, pricedPct, coverMark));
+  const burstDidNotRun =
+    (conclusion === "failure" || conclusion === "cancelled") && chunkDone === 0;
+  lines.push(
+    "",
+    ...buildCoverageLines(kpi, chunkOk, pricedPct, coverMark, { burstDidNotRun })
+  );
 
   if (runUrl) {
     lines.push("", `Лог: ${runUrl}`);
