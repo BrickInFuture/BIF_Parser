@@ -70,8 +70,30 @@ function formatReportDateRu(date = new Date(), timeZone = REPORT_TZ) {
   return `${day} ${MONTHS_RU[month - 1]} ${year}, ${hourStr}:${minute} ${dayPart}`;
 }
 
+/** Цель покрытия каталога свежими ценами. */
+const COVERAGE_PCT_TARGET = 98;
+
 /** Цель успеха окна / месяца в отчёте. */
 const SUCCESS_PCT_TARGET = 90;
+
+/**
+ * Шкала покрытия (свежие цены / каталог наборы+минифиги):
+ * ≥98 🟢🟢🟢 · ≥95 🟢🟢 · ≥90 🟢 ·
+ * ≥85 🟡🟡🟡 · ≥75 🟡🟡 · ≥70 🟡 ·
+ * ≥50 🔴 · <50 🚨
+ */
+function coverageCircles(pricedPct) {
+  if (pricedPct == null || !Number.isFinite(Number(pricedPct))) return "—";
+  const p = Number(pricedPct);
+  if (p >= 98) return "🟢🟢🟢";
+  if (p >= 95) return "🟢🟢";
+  if (p >= 90) return "🟢";
+  if (p >= 85) return "🟡🟡🟡";
+  if (p >= 75) return "🟡🟡";
+  if (p >= 70) return "🟡";
+  if (p >= 50) return "🔴";
+  return "🚨";
+}
 
 /**
  * 🟢 успех ≥90%, 🟡 ниже, 🔴 отменён / ошибка / нет данных прогона.
@@ -217,6 +239,11 @@ function buildReportText() {
         : null;
 
   const circle = statusCircle(conclusion, chunkPct);
+  const pricedPct =
+    kpi.pricedPctPrimary != null && Number.isFinite(Number(kpi.pricedPctPrimary))
+      ? Number(kpi.pricedPctPrimary)
+      : null;
+  const coverMark = coverageCircles(pricedPct);
   const when = formatReportDateRu(new Date());
   const analysis = buildAnalysis({
     conclusion,
@@ -245,12 +272,15 @@ function buildReportText() {
     "Что произошло:",
     ...analysis.map((s) => `• ${s}`),
     "",
-    "Покрытие (наборы+минифиги):",
-    `• с ценами: ${n(kpi.freshOkPrimary)} из ${n(kpi.catalogPrimary)} (${n(kpi.pricedPctPrimary)}%)`,
+    `Покрытие ${coverMark} (наборы+минифиги, цель ≥${COVERAGE_PCT_TARGET}%):`,
+    `• с ценами: ${n(kpi.freshOkPrimary)} из ${n(kpi.catalogPrimary)} (${pricedPct != null ? `${pricedPct}%` : "—"})`,
     `• в день: ${n(kpi.okPerDayWithPrices)} (цель >${n(kpi.okPerDayTarget != null ? kpi.okPerDayTarget : 2000)})`,
     `• успех за месяц: ${n(kpi.runSuccessPct)}% (цель >${SUCCESS_PCT_TARGET}%; ok ${n(kpi.runOk)} / fail ${n(kpi.runFail)})`,
     `• очередь ошибок: ${n(kpi.errorBacklogPrimary)}`,
   ];
+  if (pricedPct != null && pricedPct < 50) {
+    lines.push("• 🚨 покрытие ниже 50% — критично, каталог почти без свежих цен");
+  }
   if (runUrl) {
     lines.push("", `Лог: ${runUrl}`);
   }
@@ -338,8 +368,11 @@ module.exports = {
   buildReportText,
   formatReportDateRu,
   statusCircle,
+  coverageCircles,
   buildAnalysis,
   formatSecPerOk,
+  COVERAGE_PCT_TARGET,
+  SUCCESS_PCT_TARGET,
 };
 
 if (require.main === module) {

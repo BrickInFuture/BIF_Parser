@@ -173,16 +173,20 @@ async function main() {
     1,
     Number(process.env.BL_OK_PER_DAY_TARGET) || 2000
   );
-  // Price coverage only: no_data does not count toward the 95% priced target.
+  // Price coverage only: no_data does not count toward the 98% priced target.
   const pricedPctPrimary =
     catalogPrimary > 0 ? Math.round((freshOkPrimary / catalogPrimary) * 1000) / 10 : null;
   const okWithPricesPerDay =
     Number(run.okWithPrices) > 0
       ? Math.round((Number(run.okWithPrices) / runDays) * 10) / 10
       : null;
+  const coverageTargetPct = Math.max(
+    1,
+    Number(process.env.BL_COVERAGE_TARGET_PCT) || 98
+  );
   const onTrack =
     pricedPctPrimary != null
-      ? pricedPctPrimary >= 95 ||
+      ? pricedPctPrimary >= coverageTargetPct ||
         (okWithPricesPerDay != null && okWithPricesPerDay >= okPerDayTarget * 0.75)
       : false;
 
@@ -223,7 +227,7 @@ async function main() {
     runSuccessPct: successPct,
     runRetryLeft: Number(run.retryLeft) || 0,
     errorTagCounts: run.errorTagCounts || {},
-    targetCoveragePct: 95,
+    targetCoveragePct: coverageTargetPct,
     onTrack28d: onTrack,
     onTrack20d: onTrack,
     onTrack14d: onTrack,
@@ -280,7 +284,7 @@ async function main() {
       `- avgSec ok: \`${avgSecOk ?? "n/a"}\` · soft: \`${avgSecSoft ?? "n/a"}\` (goal soft &lt; 8s)`,
       `- circuitTrips: \`${Number(run.circuitTrips) || 0}\` · phase: \`${run.ingestPhase || "n/a"}\``,
       `- month run success%: \`${successPct ?? "n/a"}\` (ok ${run.ok || 0} / fail ${run.fail || 0})`,
-      `- target: ≥95% fresh **priced** primary coverage in ${DAYS}d`,
+      `- target: ≥${coverageTargetPct}% fresh **priced** primary coverage in ${DAYS}d`,
       "",
     ];
     fs.appendFileSync(summaryPath, `${lines.join("\n")}\n`, "utf8");
