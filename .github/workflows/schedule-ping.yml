@@ -1,0 +1,11 @@
+name: schedule ping
+on:
+  schedule:
+    - cron: "55 * * * *"
+  workflow_dispatch:
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: ping
+        run: echo "schedule-ping $(date -u +%Y-%m-%dT%H:%M:%SZ)"
