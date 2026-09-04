@@ -5,7 +5,12 @@
  *   TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID  — основной канал
  *   INGEST_NOTIFY_EMAIL (optional)         — копия на почту через FormSubmit
  *
- *   node collector/notifyIngestReport.js
+ *   node scripts/bricklink-parser/notifyIngestReport.js
+ *
+ * Как отличить запуск:
+ *   GITHUB_EVENT_NAME=schedule              → по расписанию
+ *   BL_RUN_REASON=schedule                  → автопинк (Firebase / запасной kick)
+ *   BL_RUN_REASON=owner (или пусто + dispatch) → вручную (ты / агент / кнопка)
  */
 "use strict";
 
@@ -61,7 +66,6 @@ function formatReportDateRu(date = new Date(), timeZone = REPORT_TZ) {
   const hour = Number(get("hour"));
   const minute = String(get("minute") || "00").padStart(2, "0");
   const hourStr = String(hour).padStart(2, "0");
-  // Как в примере: «04:04 утра» (ночь только 0–3).
   let dayPart = "дня";
   if (hour >= 0 && hour < 4) dayPart = "ночи";
   else if (hour >= 4 && hour < 12) dayPart = "утра";
@@ -112,10 +116,24 @@ function statusRu(conclusion) {
   return conclusion || "unknown";
 }
 
-function eventRu(event) {
-  if (event === "schedule") return "по расписанию";
-  if (event === "workflow_dispatch") return "ручной запуск";
-  return event || "—";
+/**
+ * Коротко: по расписанию | вручную.
+ * Автопинк Firebase шлёт workflow_dispatch с reason=schedule — иначе GitHub врёт «ручной».
+ */
+function runKindRu(event, reason) {
+  const ev = String(event || "").trim();
+  const r = String(reason || "")
+    .trim()
+    .toLowerCase();
+  if (ev === "schedule") return "по расписанию";
+  if (r === "schedule" || r === "cron" || r === "auto" || r === "kick") {
+    return "по расписанию";
+  }
+  if (r === "owner" || r === "manual" || r === "agent" || r === "cursor") {
+    return "вручную";
+  }
+  if (ev === "workflow_dispatch") return "вручную";
+  return ev || "—";
 }
 
 function topErrorTags(errorTagCounts, limit = 3) {
@@ -128,11 +146,11 @@ function topErrorTags(errorTagCounts, limit = 3) {
 
 function tagRu(tag) {
   const t = String(tag || "");
-  if (t === "soft_blocked") return "сайт режет (Oops/429)";
-  if (t === "parse_error") return "не разобрали HTML";
+  if (t === "soft_blocked") return "сайт режет частоту";
+  if (t === "parse_error") return "страница не разобралась";
   if (t === "partial_prices") return "цены частично";
   if (t === "timeout") return "таймаут";
-  if (t === "waf_blocked") return "жёсткая защита сайта";
+  if (t === "waf_blocked") return "сайт жёстко закрыл доступ";
   if (t === "exception") return "сбой запроса";
   return t;
 }
@@ -144,84 +162,148 @@ function buildAnalysis({ conclusion, catalog, retry, chunkPct, chunkDone, chunkO
   const circuitStop =
     catalog.circuitOpenThisWindow === true ||
     catalog.stopRequested === true ||
-    (Number(catalog.circuitTrips) > 0 && conclusion === "success" && chunkDone > 0 && chunkDone < 60);
+    (Number(catalog.circuitTrips) > 0 &&
+      conclusion === "success" &&
+      chunkDone > 0 &&
+      chunkDone < 60);
   const trips = Number(catalog.circuitTrips) || 0;
-  // Только метки ЭТОГО залпа. Накопление за месяц (errorTagCounts) в «Что произошло» не тащим —
-  // иначе после удачного окна 60/60 снова светятся старые «сайт режет ×417».
+  // Только метки ЭТОГО залпа — не месячные накопления.
   const windowTags = catalog.chunkErrorTagCounts || {};
   const tags = topErrorTags(windowTags);
   const soft = Number(windowTags.soft_blocked) || 0;
   const parseErr = Number(windowTags.parse_error) || 0;
   const gapPaused = catalog.gapPausedAfterHot === true;
   const scrapeSec = Number(catalog.scrapeElapsedSec) || 0;
-  const retryFail = Number(retry.chunkFail) || 0;
-  const retryOk = Number(retry.chunkOk) || 0;
-  const retryAttempted = Number(retry.attempted) || 0;
 
   if (conclusion === "cancelled") {
     if (!chunkDone) {
-      lines.push("Прогон оборвали до сводки — цифр этого окна нет (отмена / новый запуск поверх).");
+      lines.push("Прогон оборвали до сводки — цифр этого окна нет.");
     } else {
-      lines.push(`Прогон оборвали после ${chunkDone} запросов (${chunkOk} с ценами).`);
+      lines.push(`Прогон оборвали после ${chunkDone} запросов (успели ${chunkOk} с ценами).`);
     }
   } else if (conclusion === "failure") {
     lines.push("Прогон упал с ошибкой — смотри лог по ссылке.");
   } else if (timedOut) {
-    lines.push("Упёрлись в лимит времени окна, не все попытки успели.");
+    lines.push("Время окна кончилось — не все запросы успели.");
   } else if (trips > 0 && (catalog.circuitOpen || circuitStop)) {
-    const waveWord =
-      trips === 1 ? "волну" : trips >= 2 && trips <= 4 ? "волны" : "волн";
     lines.push(
-      `Окно остановили из‑за жары IP: ${trips} ${waveWord} «сайт режет» (стоп после отказов).`
+      `Остановились: сайт начал резать частоту (${trips} ${
+        trips === 1 ? "волна" : trips < 5 ? "волны" : "волн"
+      }). Лучше подождать следующий залп.`
     );
   } else if (chunkPct != null && Number(chunkPct) >= SUCCESS_PCT_TARGET) {
-    lines.push("Залп прошёл нормально: большинство запросов дали цены.");
+    lines.push("Залп прошёл нормально — почти все запросы дали цены.");
   } else if (chunkPct != null && Number(chunkPct) < SUCCESS_PCT_TARGET) {
-    lines.push(
-      `Успех ниже ${SUCCESS_PCT_TARGET}% — сайт часто резал или много пустых/битых страниц.`
-    );
+    lines.push("Много пустых или битых ответов — сайт резал или страницы пришли кривые.");
   } else if (!chunkDone) {
-    lines.push("Каталог в этом прогоне почти ничего не записал — сводки нет.");
+    lines.push("В этом прогоне каталог почти ничего не записал.");
   }
 
-  if (soft > 0) {
-    lines.push(`Отказов «сайт режет»: ${soft}.`);
-  }
-  if (parseErr > 0) {
-    lines.push(`Ошибок разбора HTML: ${parseErr}.`);
-  }
+  if (soft > 0) lines.push(`Сайт резал частоту: ${soft} раз.`);
+  if (parseErr > 0) lines.push(`Страница не разобралась: ${parseErr}.`);
   if (gapPaused) {
-    lines.push("После жары очередь дыр отключили — шли только дальше по каталогу.");
+    lines.push("После жары шли только дальше по каталогу, без очереди дыр.");
   }
   if (scrapeSec > 0 && chunkOk > 0 && scrapeSec / chunkOk > 30) {
-    lines.push("Много времени на одну цену — похоже, съели паузы/отказы, не сами запросы.");
+    lines.push("На одну цену ушло много времени — съели паузы и отказы.");
   }
-  if (retryAttempted > 0) {
-    if (retryFail > retryOk) {
-      lines.push(`Повтор ошибок слабый: ${retryOk} ок / ${retryFail} снова мимо.`);
-    } else if (retryOk > 0) {
-      lines.push(`Повтор ошибок подтянул ещё ${retryOk} из ${retryAttempted}.`);
+  // Повтор ошибок — отдельной строкой в отчёте, здесь не дублируем.
+  if (tags.length && conclusion !== "cancelled") {
+    const onlySoftParse =
+      tags.every(([k]) => k === "soft_blocked" || k === "parse_error") &&
+      soft + parseErr > 0;
+    if (!onlySoftParse) {
+      const top = tags.map(([k, v]) => `${tagRu(k)} ×${v}`).join("; ");
+      lines.push(`Чаще всего: ${top}.`);
     }
   }
-  if (tags.length && conclusion !== "cancelled") {
-    const top = tags.map(([k, v]) => `${tagRu(k)} ×${v}`).join("; ");
-    lines.push(`Топ меток: ${top}.`);
-  }
 
-  if (!lines.length) lines.push("Заметных проблем по сводке не видно.");
+  if (!lines.length) lines.push("По сводке заметных проблем нет.");
   return lines;
 }
 
-function buildReportText() {
+function buildCoverageLines(kpi, chunkOk, pricedPct, coverMark) {
+  const lines = [];
+  const fresh = Number(kpi.freshOkPrimary);
+  const catalog = Number(kpi.catalogPrimary);
+  const monthPriced = Number(
+    kpi.runOkWithPrices != null ? kpi.runOkWithPrices : kpi.runOk
+  );
+  const perDay = Number(kpi.okPerDayWithPrices);
+  const dayTarget = Number(kpi.okPerDayTarget != null ? kpi.okPerDayTarget : 2000);
+  const successPct = kpi.runSuccessPct;
+  const runOk = Number(kpi.runOk) || 0;
+  const runFail = Number(kpi.runFail) || 0;
+  const backlog = kpi.errorBacklogPrimary;
+
+  lines.push(
+    `Каталог ${coverMark} — свежие цены (за ~28 дней, цель ≥${COVERAGE_PCT_TARGET}%):`
+  );
+  if (Number.isFinite(fresh) && Number.isFinite(catalog) && catalog > 0) {
+    lines.push(
+      `• сейчас с ценой: ${fresh} из ${catalog}${
+        pricedPct != null ? ` (${pricedPct}%)` : ""
+      }`
+    );
+  } else {
+    lines.push(`• сейчас с ценой: ${n(kpi.freshOkPrimary)} из ${n(kpi.catalogPrimary)}`);
+  }
+
+  if (Number.isFinite(monthPriced) && monthPriced > 0) {
+    lines.push(`• съёмов с ценой за месяц: ${monthPriced}`);
+  }
+  if (Number.isFinite(perDay) && perDay > 0) {
+    const pace =
+      perDay >= dayTarget
+        ? "темп ок"
+        : perDay >= dayTarget * 0.75
+          ? "темп ниже цели"
+          : "темпа не хватает — покрытие почти не растёт";
+    lines.push(`• в среднем в день: ${perDay} (цель >${dayTarget}) — ${pace}`);
+  } else {
+    lines.push(`• в среднем в день: ${n(kpi.okPerDayWithPrices)} (цель >${dayTarget})`);
+  }
+
+  if (successPct != null && successPct !== "") {
+    lines.push(
+      `• удачность за месяц: ${successPct}% (ок ${runOk}, мимо ${runFail}; цель >${SUCCESS_PCT_TARGET}%)`
+    );
+  }
+  if (backlog != null && backlog !== "") {
+    lines.push(`• ждут повтора после ошибки: ${n(backlog)}`);
+  }
+
+  if (pricedPct != null && pricedPct < 50) {
+    lines.push("• 🚨 меньше половины каталога со свежей ценой — критично");
+  }
+
+  if (
+    chunkOk >= 30 &&
+    Number.isFinite(perDay) &&
+    perDay < dayTarget * 0.75 &&
+    pricedPct != null &&
+    pricedPct < 90
+  ) {
+    lines.push(
+      "• часть цен устаревает (выпадает из окна ~28 дней), а залпы пока не успевают наращивать уникальных"
+    );
+  }
+
+  return lines;
+}
+
+function buildReportText(env = process.env) {
   const catalog = readIngestArtifact("catalog") || {};
   const retry = readIngestArtifact("retry") || {};
   const kpi = readIngestArtifact("kpi") || {};
-  const conclusion = process.env.JOB_CONCLUSION || "unknown";
-  const runUrl = process.env.GITHUB_RUN_URL || "";
-  const event = process.env.GITHUB_EVENT_NAME || "";
+  const conclusion = env.JOB_CONCLUSION || "unknown";
+  const runUrl = env.GITHUB_RUN_URL || "";
+  const event = env.GITHUB_EVENT_NAME || "";
+  const reason = env.BL_RUN_REASON || "";
 
   const chunkDone = Number(catalog.chunkDone) || 0;
   const chunkOk = Number(catalog.chunkOkWithPrices) || 0;
+  const chunkNoData = Number(catalog.chunkNoData) || 0;
   const chunkPct =
     catalog.chunkSuccessPct != null
       ? Number(catalog.chunkSuccessPct)
@@ -234,12 +316,6 @@ function buildReportText() {
       : chunkOk > 0 && catalog.scrapeElapsedSec
         ? Math.round((Number(catalog.scrapeElapsedSec) / chunkOk) * 10) / 10
         : null;
-  const okPerHour =
-    catalog.okPerHour != null
-      ? catalog.okPerHour
-      : secPerOk > 0
-        ? Math.round((3600 / secPerOk) * 10) / 10
-        : null;
 
   const circle = statusCircle(conclusion, chunkPct);
   const pricedPct =
@@ -248,6 +324,7 @@ function buildReportText() {
       : null;
   const coverMark = coverageCircles(pricedPct);
   const when = formatReportDateRu(new Date());
+  const kind = runKindRu(event, reason);
   const analysis = buildAnalysis({
     conclusion,
     catalog,
@@ -260,38 +337,32 @@ function buildReportText() {
   const lines = [
     `${circle} Парсер цен — ${statusRu(conclusion)}`,
     when,
-    `Месяц: ${n(kpi.periodId || catalog.periodId)} · ${eventRu(event)}`,
+    kind,
     "",
-    "Каталог (этот прогон):",
+    "Этот залп:",
     `• запросов: ${n(catalog.chunkDone)}`,
-    `• с ценами: ${n(catalog.chunkOkWithPrices)}`,
-    `• без данных: ${n(catalog.chunkNoData)}`,
-    `• успех: ${chunkPct != null ? `${chunkPct}%` : "—"} (цель >${SUCCESS_PCT_TARGET}%)`,
-    `• на 1 цену: ${formatSecPerOk(secPerOk)}${okPerHour != null ? ` (~${n(okPerHour)} цен/час)` : ""}`,
-    "",
-    "Повтор ошибок:",
-    `• попыток: ${n(retry.attempted)} · OK ${n(retry.chunkOk)} · fail ${n(retry.chunkFail)}`,
-    "",
-    "Что произошло:",
-    ...analysis.map((s) => `• ${s}`),
-    "",
-    `Покрытие ${coverMark} (наборы+минифиги, цель ≥${COVERAGE_PCT_TARGET}%):`,
-    `• уникальных с ценами (за 28 дн.): ${n(kpi.freshOkPrimary)} из ${n(kpi.catalogPrimary)} (${pricedPct != null ? `${pricedPct}%` : "—"})`,
-    `• съёмов с ценами за месяц: ${n(kpi.runOkWithPrices != null ? kpi.runOkWithPrices : kpi.runOk)}`,
-    `• в день: ${n(kpi.okPerDayWithPrices)} (цель >${n(kpi.okPerDayTarget != null ? kpi.okPerDayTarget : 2000)})`,
-    `• успех за месяц: ${n(kpi.runSuccessPct)}% (цель >${SUCCESS_PCT_TARGET}%; ok ${n(kpi.runOk)} / fail ${n(kpi.runFail)})`,
-    `• очередь ошибок: ${n(kpi.errorBacklogPrimary)}`,
+    `• с ценами: ${n(catalog.chunkOkWithPrices)}${
+      chunkPct != null ? ` (${chunkPct}%, цель >${SUCCESS_PCT_TARGET}%)` : ""
+    }`,
   ];
-  if (pricedPct != null && pricedPct < 50) {
-    lines.push("• 🚨 покрытие ниже 50% — критично, каталог почти без свежих цен");
+  if (chunkNoData > 0) {
+    lines.push(`• без данных на сайте: ${chunkNoData}`);
   }
-  const monthPriced = Number(kpi.runOkWithPrices != null ? kpi.runOkWithPrices : kpi.runOk) || 0;
-  const freshN = Number(kpi.freshOkPrimary) || 0;
-  if (chunkOk >= 30 && monthPriced > freshN + 200) {
+  if (secPerOk != null) {
+    lines.push(`• скорость: ~${formatSecPerOk(secPerOk)} на одну цену`);
+  }
+
+  const retryAttempted = Number(retry.attempted) || 0;
+  if (retryAttempted > 0) {
     lines.push(
-      "• залпы пишут цены, но уникальных почти не прибывает — часто повтор уже покрытых (дыры в старых месяцах)"
+      "",
+      `Повтор старых ошибок: ${n(retry.chunkOk)} ок / ${n(retry.chunkFail)} мимо (из ${retryAttempted})`
     );
   }
+
+  lines.push("", "Что произошло:", ...analysis.map((s) => `• ${s}`));
+  lines.push("", ...buildCoverageLines(kpi, chunkOk, pricedPct, coverMark));
+
   if (runUrl) {
     lines.push("", `Лог: ${runUrl}`);
   }
@@ -381,7 +452,9 @@ module.exports = {
   statusCircle,
   coverageCircles,
   buildAnalysis,
+  buildCoverageLines,
   formatSecPerOk,
+  runKindRu,
   COVERAGE_PCT_TARGET,
   SUCCESS_PCT_TARGET,
 };

@@ -1,4 +1,4 @@
-# Internal collector вЂ” raw market observations only.
+# Internal collector — raw market observations only.
 # Needs secret FIREBASE_SERVICE_ACCOUNT_DEV.
 # Optional: TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID, BL_PROXY_URL.
 #
@@ -13,6 +13,10 @@ on:
     - cron: "55 * * * *"
   workflow_dispatch:
     inputs:
+      reason:
+        description: "schedule = auto kick; owner = manual"
+        required: false
+        default: "owner"
       limit:
         description: "Max items per short burst (SET+MINIFIG); stay under IP heat (~60)"
         required: false
@@ -130,4 +134,5 @@ jobs:
           JOB_CONCLUSION: ${{ job.status }}
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
+          BL_RUN_REASON: ${{ github.event.inputs.reason || '' }}
         run: node collector/notifyIngestReport.js
