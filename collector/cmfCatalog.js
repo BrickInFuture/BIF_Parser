@@ -1,5 +1,5 @@
 /**
- * Collectable Minifigures (CMF): BIF type vs BrickLink lookup.
+ * Collectable Minifigures (CMF): BIF type vs source lookup.
  *
  * Public catalog id stays Brickset Number-Variant (MINIFIG_71051-1 / SET_71051-0).
  * Parsers must use brickLinkItemType + brickLinkNo (M=col461, S=71051-1), never
@@ -28,7 +28,7 @@ function isCmfThemePrimary(name) {
   return CMF_THEME_RE.test(String(name || "").trim());
 }
 
-/** Обе орфографии Brickset / BrickLink для запросов по themePrimary. */
+/** Орфографии тем для запросов по themePrimary. */
 function cmfThemePrimaryQueryNames(hint = "") {
   if (!isCmfThemePrimary(hint)) {
     const one = String(hint || "").trim();
@@ -101,14 +101,14 @@ function isCompleteOrSealedBox(src = {}) {
 }
 
 /**
- * BrickLink catalogPG key for a CMF row/doc.
+ * CatalogPG key for a CMF row/doc.
  * Non-CMF → {}.
  * Figure with one col### → { itemType: MINIFIG, itemNumber, status: "ok" }.
  * Figure without col → { skip: true, reason: "missing_col" }.
  * Random pack NNNN-0 → { SET, NNNN-1 }.
  * Complete / Sealed Box → { skip: true, reason: "skip_no_bl_item" }.
  */
-function resolveBrickLinkLookup(src = {}) {
+function resolveSourceLookup(src = {}) {
   if (!isCmfTheme(src)) return {};
   if (isCmfFigure(src)) {
     const col = singleMinifigNumber(src);
@@ -134,7 +134,7 @@ function resolveBrickLinkLookup(src = {}) {
 /**
  * Prefer stored brickLink* fields; fall back to live resolve.
  */
-function effectiveBrickLinkLookup(src = {}) {
+function resolveSourceLookup(src = {}) {
   const storedType = String(src.brickLinkItemType || "").trim().toUpperCase();
   const storedNo = String(src.brickLinkNo || "").trim();
   if (storedType && storedNo) {
@@ -144,13 +144,13 @@ function effectiveBrickLinkLookup(src = {}) {
   if (status === "missing_col" || status === "skip_no_bl_item") {
     return { skip: true, reason: status };
   }
-  return resolveBrickLinkLookup(src);
+  return resolveSourceLookup(src);
 }
 
-function brickLinkCatalogFields(src = {}) {
+function sourceCatalogFields(src = {}) {
   if (!isCmfTheme(src)) return {};
   const setType = normalizeSetType(src);
-  const lookup = resolveBrickLinkLookup(src);
+  const lookup = resolveSourceLookup(src);
   const out = {};
   if (setType) out.bricksetSetType = setType;
   if (lookup.skip) {
@@ -203,9 +203,9 @@ module.exports = {
   isCmfPackOrCollection,
   parseMinifigNumbers,
   singleMinifigNumber,
-  resolveBrickLinkLookup,
-  effectiveBrickLinkLookup,
-  brickLinkCatalogFields,
+  resolveSourceLookup,
+  resolveSourceLookup,
+  sourceCatalogFields,
   catalogItemTypeForCmf,
   itemNumberOf,
   alternateCatalogDocId,

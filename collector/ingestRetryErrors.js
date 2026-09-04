@@ -1,10 +1,10 @@
 /**
- * Retry BrickLink observations that failed this month (status=error).
+ * Retry failed observations that failed this month (status=error).
  *
  * Prefers SET + MINIFIG. Secondary types (BOX / INSTRUCTION / GEAR) only when
  * primary errors are empty or --phase=secondary / --types=… overrides.
  *
- *   npm run ingest:bricklink:retry-errors -- --confirm --limit=100 --maxMinutes=60
+ *   npm run ingest:retry -- --confirm --limit=100 --maxMinutes=60
  *
  * Does not forget failures: re-scrapes until ok/no_data or still error (will retry next night).
  * Last-good bif_prices are never overwritten on fail.
@@ -12,12 +12,12 @@
 "use strict";
 
 const { initFirebaseAdmin } = require("./firebaseAdmin");
-const { BrickLinkSession, HTTP_METHOD } = require("./session");
+const { CollectorSession, HTTP_METHOD } = require("./session");
 const { normalizeSetNo, errorLooksLikeSoftBlock } = require("./parseHtml");
 const { writeObservationFromParse } = require("./observationWriter");
 const { utcYearMonth } = require("./gapLedger");
 const { loadOrCreateRun, patchRun, runDocId } = require("./checkpoint");
-const { resolveBrickLinkFetch } = require("./blUrls");
+const { resolveMarketFetch } = require("./blUrls");
 const { writeIngestArtifact } = require("./ingestReportArtifacts");
 const {
   PRIMARY_TYPES,
@@ -155,7 +155,7 @@ async function main() {
   console.log(
     JSON.stringify(
       {
-        step: "bricklink_retry_errors_start",
+        step: "retry_errors_start",
         periodId,
         confirm: CONFIRM,
         writeBif: !NO_BIF,
@@ -233,7 +233,7 @@ async function main() {
   // Ensure run doc exists for counters
   await loadOrCreateRun(db, periodId, FieldValue, { dryRun: !CONFIRM });
 
-  const session = new BrickLinkSession({
+  const session = new CollectorSession({
     headless: HEADLESS,
     pauseMs: process.env.BL_PAUSE_MS ? undefined : [1500, 3000],
   });
@@ -264,7 +264,7 @@ async function main() {
       if (row.catalogItemId) {
         const cat = await db.collection("catalog_items").doc(row.catalogItemId).get();
         if (cat.exists) {
-          const fetch = resolveBrickLinkFetch(cat.data() || {});
+          const fetch = resolveMarketFetch(cat.data() || {});
           if (fetch.skip) {
             chunkFail += 1;
             retryFail += 1;

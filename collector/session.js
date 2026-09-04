@@ -1,5 +1,5 @@
 /**
- * Persistent BrickLink session: one Chromium warm-up for AWS WAF token,
+ * Persistent collector session: one Chromium warm-up for AWS WAF token,
  * then many Price Guide fetches via plain HTTP reusing cookies (hypothesis A).
  * Falls back to full browser navigation when HTTP fails or BL_HTTP_FETCH=0.
  *
@@ -21,7 +21,7 @@ const {
   hasNoItemsFoundMarker,
   looksSoftBlockShell,
 } = require("./parseHtml");
-const { brickLinkCatalogPgUrl, normalizeItemNumber } = require("./blUrls");
+const { marketCatalogPgUrl, normalizeItemNumber } = require("./blUrls");
 
 const DEFAULT_TIMEOUT_MS = Number(process.env.BL_PARSE_TIMEOUT_MS || 90000) || 90000;
 const DEFAULT_USER_AGENT =
@@ -311,7 +311,7 @@ async function waitForPriceGuide(page, timeoutMs) {
   };
 }
 
-class BrickLinkSession {
+class CollectorSession {
   /**
    * @param {{ headless?: boolean, timeoutMs?: number, pauseMs?: [number, number], proxyUrl?: string }} opts
    */
@@ -432,7 +432,7 @@ class BrickLinkSession {
             "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
           "Accept-Language": "en-US,en;q=0.9",
           "Cache-Control": "no-cache",
-          Referer: "https://www.bricklink.com/",
+          Referer: "https://www.market.com/",
           Cookie: this.httpCookieHeader || "",
         },
         signal: AbortSignal.timeout(this.timeoutMs),
@@ -644,7 +644,7 @@ class BrickLinkSession {
     await this.warmUp();
     timing.pauseMs += await this.pause();
 
-    const url = brickLinkCatalogPgUrl(itemType, setNo);
+    const url = marketCatalogPgUrl(itemType, setNo);
     const useHttp = httpFetchEnabled() && !opts.forceBrowser;
     let result = await this.#fetchAndParse(url, setNo, opts, timing);
     const shallow = !!opts.fastFail || !!opts.catalogPass;
@@ -896,7 +896,7 @@ class BrickLinkSession {
 }
 
 module.exports = {
-  BrickLinkSession,
+  CollectorSession,
   waitForPriceGuide,
   DEFAULT_TIMEOUT_MS,
   defaultPauseMs,

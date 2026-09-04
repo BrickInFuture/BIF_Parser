@@ -1,5 +1,5 @@
 /**
- * Coverage policy for BrickLink bulk ingest.
+ * Coverage policy for bulk ingest.
  * Canonical product rules: ./PARSING_RULES.md
  *
  * Novelty (launch+2d … launch+365d): need a point for the current calendar month.

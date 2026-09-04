@@ -1,6 +1,6 @@
 /**
- * Checkpoint / run state for monthly BrickLink catalog ingest.
- * Doc: price_ingest_runs/bricklink_{periodId} (or …_s{N} for shards)
+ * Checkpoint / run state for monthly Catalog ingest.
+ * Doc: price_ingest_runs/market_{periodId} (or …_s{N} for shards)
  */
 "use strict";
 

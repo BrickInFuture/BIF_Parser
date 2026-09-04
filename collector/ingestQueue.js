@@ -1,9 +1,9 @@
 /**
  * Process user-requested price refreshes from Firestore queue.
  *
- *   npm run ingest:bricklink:queue -- --confirm --limit=20
- *   npm run ingest:bricklink:queue -- --confirm --item=SET_75192-1
- *   npm run ingest:bricklink:queue -- --check-only
+ *   npm run ingest:queue -- --confirm --limit=20
+ *   npm run ingest:queue -- --confirm --item=SET_75192-1
+ *   npm run ingest:queue -- --check-only
  *
  * Docs: price_refresh_requests/{catalogItemId}
  * status: pending → running → done | error
@@ -14,10 +14,10 @@
 "use strict";
 
 const { initFirebaseAdmin } = require("./firebaseAdmin");
-const { BrickLinkSession } = require("./session");
+const { CollectorSession } = require("./session");
 const { normalizeSetNo } = require("./parseHtml");
 const { writeObservationFromParse, writeRrpBootstrapObservation } = require("./observationWriter");
-const { resolveBrickLinkFetch } = require("./blUrls");
+const { resolveMarketFetch } = require("./blUrls");
 const { pickCatalogRrpUsd, pickCatalogLaunchMs } = require("./catalogFields");
 const { classifyCoverage } = require("./coveragePolicy");
 
@@ -115,7 +115,7 @@ async function resolvePriorityItem(db, FieldValue, catalogItemId) {
     throw new Error(`catalog_item_missing:${catalogItemId}`);
   }
   const cat = catSnap.data() || {};
-  const fetch = resolveBrickLinkFetch(cat);
+  const fetch = resolveMarketFetch(cat);
   const itemType = fetch.skip ? String(cat.itemType || "SET").toUpperCase() : fetch.itemType;
   const itemNumber = fetch.skip
     ? normalizeSetNo(cat.itemNumber) || String(cat.itemNumber || "").trim() || null
@@ -148,7 +148,7 @@ async function resolvePriorityItem(db, FieldValue, catalogItemId) {
 async function resolveFetchFromCatalog(db, req) {
   const catSnap = await db.collection("catalog_items").doc(req.catalogItemId).get();
   if (catSnap.exists) {
-    const fetch = resolveBrickLinkFetch(catSnap.data() || {});
+    const fetch = resolveMarketFetch(catSnap.data() || {});
     if (fetch.skip) return fetch;
     if (fetch.itemNumber) return fetch;
   }
@@ -207,7 +207,7 @@ async function processOne(admin, db, FieldValue, session, req, summary) {
         itemType: req.itemType || "SET",
         setNo: req.itemNumber || null,
         parsed: { ok: true, empty: true },
-        method: "bricklink_lookup_skip",
+        method: "lookup_skip",
         errorTag: reason,
       },
       { writeBif: false, dryRun: false }
@@ -406,7 +406,7 @@ async function main() {
     return;
   }
 
-  const session = new BrickLinkSession({ headless: HEADLESS });
+  const session = new CollectorSession({ headless: HEADLESS });
   const summary = [];
 
   try {

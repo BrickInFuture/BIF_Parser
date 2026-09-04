@@ -1,10 +1,10 @@
 /**
- * СЫРОЙ путь (публичный): запись рыночных точек BrickLink в Firestore
+ * СЫРОЙ путь (публичный): запись рыночных точек market в Firestore
  * БЕЗ расчёта оценки BIF.
  *
  * Пишет только:
- *   market_observations/{id}__bricklink                    — последний снимок
- *   market_observations/{id}__bricklink/monthly/{YYYY-MM}  — помесячно sold/stock
+ *   market_observations/{id}__market                    — последний снимок
+ *   market_observations/{id}__market/monthly/{YYYY-MM}  — помесячно sold/stock
  *
  * Оценку BIF считает закрытая часть (functions/bifFromObservation.js):
  *   • в приватном/локальном прогоне — inline после этой записи (см. observationWriter.js);

@@ -1,5 +1,5 @@
 /**
- * Pure BrickLink catalogPG.asp HTML → sold/stock aggregates (no browser).
+ * Pure CatalogPG.asp HTML → sold/stock aggregates (no browser).
  *
  * Distinguishes:
  * - AWS WAF / soft-block pages (blocked) — including large "Page Not Found" junk shells
@@ -103,13 +103,13 @@ function hasUsefulAgg(a) {
 /** Lots/qty parsed but unit prices missing → broken money parse, NOT empty market. */
 function hasCountsWithoutPrices(a) {
   if (!a) return false;
-  if (a.explicitNoPrice) return false; // BrickLink shows real "N/A" cells, not a parse miss
+  if (a.explicitNoPrice) return false; // market shows real "N/A" cells, not a parse miss
   const hasCount = (Number(a.count) || 0) > 0 || (Number(a.totalQty) || 0) > 0;
   if (!hasCount) return false;
   return a.avgUsd == null && a.qtyAvgUsd == null && a.minUsd == null && a.maxUsd == null;
 }
 
-/** Count present, but BrickLink's own price cells are explicit "N/A"/"-" (not a parse bug). */
+/** Count present, but market's own price cells are explicit "N/A"/"-" (not a parse bug). */
 function hasExplicitNoPriceCount(a) {
   if (!a || !a.explicitNoPrice) return false;
   return (Number(a.count) || 0) > 0 || (Number(a.totalQty) || 0) > 0;
@@ -117,7 +117,7 @@ function hasExplicitNoPriceCount(a) {
 
 /**
  * Structural (DOM-based) summary reader — replaces the old "cut text with a regex window"
- * approach for the common case. BrickLink's price tables are old-school nested <table> markup;
+ * approach for the common case. market's price tables are old-school nested <table> markup;
  * a fixed character-window regex can cut a block off right after a label and before its value
  * lands in a sibling <td>, which silently drops the price while the label/count survive.
  * Reading the actual label <td> → next <td> pairing sidesteps that entirely, regardless of
@@ -146,7 +146,7 @@ function summaryLabelKey(rawText) {
   return hit ? hit[0] : null;
 }
 
-/** "N/A" / "-" / blank cell — BrickLink explicitly has no computable price, not a parse miss. */
+/** "N/A" / "-" / blank cell — market explicitly has no computable price, not a parse miss. */
 function isExplicitNoPricePlaceholder(rawValue) {
   if (rawValue == null) return false;
   const t = cleanCellText(rawValue).replace(/^US\s*\$?\s*/i, "").trim();
@@ -198,7 +198,7 @@ function aggFromStructuredBlock(block) {
   agg.medianUsd = null;
 
   // All four price cells found in the DOM and each is an explicit "N/A"/"-" placeholder →
-  // BrickLink itself has no computable price for this row (real state, not a parse miss).
+  // market itself has no computable price for this row (real state, not a parse miss).
   const priceCells = ["minPrice", "avgPrice", "qtyAvgPrice", "maxPrice"].map((k) => get(k));
   agg.explicitNoPrice =
     priceCells.every((v) => v != null) && priceCells.every(isExplicitNoPricePlaceholder);
@@ -263,7 +263,7 @@ function hasPageNotFoundMarker(title, raw) {
   );
 }
 
-/** BrickLink catalog miss (wrong id / no listing) — often a large shell with bathroom.gif. */
+/** Catalog miss (wrong id / no listing) — often a large shell with bathroom.gif. */
 function hasNoItemsFoundMarker(raw) {
   return /No\s+Item\(s\)\s+were\s+found/i.test(String(raw || ""));
 }
@@ -344,7 +344,7 @@ function isWafChallengePage(html) {
     return true;
   }
 
-  // Oops / BrickLink Error / Sorry! shells — same detector as live poll in session.js.
+  // Oops / market Error / Sorry! shells — same detector as live poll in session.js.
   // Without this, parseCatalogPgHtml falls through to "No price aggregates" (mis-tag).
   if (looksSoftBlockShell(title, raw)) return true;
 
@@ -438,7 +438,7 @@ const MONTH_HEADER_RE = new RegExp(
   "gi"
 );
 
-/** «August 2026» на BrickLink → periodId UTC (2026-08). */
+/** «August 2026» на market → periodId UTC (2026-08). */
 function monthLabelToPeriodId(monthName, yearStr) {
   const m = MONTH_NAME_TO_NUM[String(monthName || "").toLowerCase()];
   const y = Number(yearStr);
@@ -709,7 +709,7 @@ function parseCatalogPgHtml(html) {
     return result;
   }
 
-  // Real BrickLink "N/A" price cells next to a lot count → legitimately no price, not a bug.
+  // Real market "N/A" price cells next to a lot count → legitimately no price, not a bug.
   const explicitNoPriceCount =
     hasExplicitNoPriceCount(result.soldNew) ||
     hasExplicitNoPriceCount(result.soldUsed) ||

@@ -1,17 +1,14 @@
-# Публичный парсер BrickLink — RAW-ONLY (пишет только sold/stock).
-# Оценку BIF считает закрытая сторона (Cloud Function onMarketMonthlyWritten).
-# Публичный репозиторий → безлимитные бесплатные минуты Actions.
-#
-# Нужен секрет FIREBASE_SERVICE_ACCOUNT_DEV (JSON сервис-аккаунта dev-проекта).
-# Опционально: TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID, BL_PROXY_URL.
+# Internal collector — raw market observations only.
+# Needs secret FIREBASE_SERVICE_ACCOUNT_DEV.
+# Optional: TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID, BL_PROXY_URL.
 
-name: BrickLink parser (public, raw-only)
+name: BIF collector
 
 on:
   workflow_dispatch:
     inputs:
       limit:
-        description: "Max scrapes per short burst (SET+MINIFIG); stay under IP heat (~60)"
+        description: "Max items per short burst (SET+MINIFIG); stay under IP heat (~60)"
         required: false
         default: "60"
       maxMinutes:
@@ -19,12 +16,11 @@ on:
         required: false
         default: "15"
   schedule:
-    # Короткие залпы: ~60 попыток, стоп при жаре. Каждые 40 мин, дни 1–26 UTC.
-    # Цель ≥2000 успешных/день без длинных охлаждаек.
+    # Short bursts: ~60 attempts, stop on heat. Every 40 min, days 1–26 UTC.
     - cron: "0,40 * 1-26 * *"
 
 concurrency:
-  group: bricklink-parser-public
+  group: bif-collector-public
   cancel-in-progress: true
 
 jobs:
@@ -38,7 +34,7 @@ jobs:
       BL_PAUSE_MS: "400,800"
       BL_SOFT_BLOCK_FAST_MS: "3000"
       BL_CIRCUIT_SOFT_LIMIT: "5"
-      # После 5 «сайт режет» — стоп окна (без 1–2 мин сна). Следующий залп через ~40 мин.
+      # After 5 soft blocks — stop window (no long cool). Next burst ~40 min later.
       BL_CIRCUIT_STOP: "1"
       BL_CIRCUIT_COOL_MIN_MS: "60000"
       BL_CIRCUIT_COOL_MAX_MS: "120000"
@@ -87,24 +83,24 @@ jobs:
           echo "$FIREBASE_SERVICE_ACCOUNT_DEV" > "$RUNNER_TEMP/sa.json"
           echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
 
-      - name: Catalog ingest chunk (primary SET+MINIFIG, raw-only)
+      - name: Catalog ingest chunk
         env:
           LIMIT: ${{ github.event.inputs.limit || '60' }}
           MAX_MINUTES: ${{ github.event.inputs.maxMinutes || '15' }}
-        run: npm run ingest:bricklink:catalog -- --confirm --phase=primary --limit="$LIMIT" --maxMinutes="$MAX_MINUTES"
+        run: npm run ingest:catalog -- --confirm --phase=primary --limit="$LIMIT" --maxMinutes="$MAX_MINUTES"
 
       - name: Retry failed observations
         continue-on-error: true
-        run: npm run ingest:bricklink:retry-errors -- --confirm --phase=primary --limit=10 --maxMinutes=3
+        run: npm run ingest:retry -- --confirm --phase=primary --limit=10 --maxMinutes=3
 
       - name: User refresh queue
-        run: npm run ingest:bricklink:queue -- --confirm --limit=15 --maxMinutes=8
+        run: npm run ingest:queue -- --confirm --limit=15 --maxMinutes=8
 
       - name: Coverage KPI
         if: always()
-        run: npm run ingest:bricklink:kpi -- --days=28 --write-run
+        run: npm run ingest:kpi -- --days=28 --write-run
 
-      - name: Notify report (Telegram)
+      - name: Notify report
         if: always()
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -112,4 +108,4 @@ jobs:
           JOB_CONCLUSION: ${{ job.status }}
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
-        run: node bricklink-parser/notifyIngestReport.js
+        run: node collector/notifyIngestReport.js

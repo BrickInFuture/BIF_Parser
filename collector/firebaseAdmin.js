@@ -1,5 +1,5 @@
 /**
- * Firebase Admin init for BrickLink ingest scripts.
+ * Firebase Admin init for ingest scripts.
  * Prefers env (CI): FIREBASE_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS.
  * Local fallback: service account JSON next to repo root.
  */

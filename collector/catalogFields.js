@@ -6,18 +6,18 @@
  * путь парсера не попадает.
  *
  * Реализации пикеров (id набора, выбор RRP/даты выхода) — простой каталожный
- * код без формул. effectiveBrickLinkLookup (маппинг CMF → BrickLink) тоже
+ * код без формул. resolveSourceLookup (маппинг CMF → источник) тоже
  * несекретный; в основном репозитории он берётся из закрытой папки, а скрипт
  * экспорта (parser:export-public) заменяет этот require на локальный
  * ./cmfCatalog и кладёт cmfCatalog.js рядом — публичная папка самодостаточна.
  */
 "use strict";
 
-const { effectiveBrickLinkLookup } = require("./cmfCatalog");
+const { resolveSourceLookup } = require("./cmfCatalog");
 
 const DEFAULT_SOURCE = "bricklink";
 
-/** Ключ документа наблюдения: `{catalogItemId}__{source}` (напр. SET_75192-1__bricklink). */
+/** Ключ документа наблюдения: `{catalogItemId}__{source}` (напр. SET_75192-1__market). */
 function observationDocId(catalogItemId, source = DEFAULT_SOURCE) {
   return `${catalogItemId}__${source}`;
 }
@@ -68,5 +68,5 @@ module.exports = {
   positiveUsdOrNull,
   pickCatalogRrpUsd,
   pickCatalogLaunchMs,
-  effectiveBrickLinkLookup,
+  resolveSourceLookup,
 };

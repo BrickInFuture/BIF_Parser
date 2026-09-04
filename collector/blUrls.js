@@ -1,8 +1,8 @@
 /**
- * BrickLink catalog URL helpers (source adapter).
+ * Catalog URL helpers (market adapter).
  *
  * Канон Price Guide для BIF: ТОЛЬКО «View older version» =
- *   https://www.bricklink.com/catalogPG.asp?S=75192-1
+ *   https://www.market.com/catalogPG.asp?S=75192-1
  * (ссылка с новой v2-карточки «View older version» ведёт сюда).
  * Новую вкладку v2/catalog/catalogitem.page#T=P НЕ используем —
  * там нет полной помесячной истории в одном HTML.
@@ -13,7 +13,7 @@
  */
 "use strict";
 
-const { effectiveBrickLinkLookup } = require("./catalogFields");
+const { resolveSourceLookup } = require("./catalogFields");
 
 const BL_TYPE_PREFIX = {
   SET: "S",
@@ -47,7 +47,7 @@ function normalizeItemNumber(raw, itemType = "SET") {
 }
 
 /** Classic Price Guide = «View older version» (full monthly sold history). */
-function brickLinkCatalogPgUrl(itemType, itemNumber) {
+function marketCatalogPgUrl(itemType, itemNumber) {
   const t = String(itemType || "SET").toUpperCase();
   const prefix = BL_TYPE_PREFIX[t] || "S";
   const no = normalizeItemNumber(itemNumber, t);
@@ -56,16 +56,16 @@ function brickLinkCatalogPgUrl(itemType, itemNumber) {
 }
 
 /** Alias: same URL — explicit name for «View older version only». */
-function brickLinkOlderPriceGuideUrl(itemType, itemNumber) {
-  return brickLinkCatalogPgUrl(itemType, itemNumber);
+function olderPriceGuideUrl(itemType, itemNumber) {
+  return marketCatalogPgUrl(itemType, itemNumber);
 }
 
 /**
- * Number/type to actually open on BrickLink for a catalog_items doc.
+ * Number/type to open for a catalog_items doc.
  * Uses stored brickLinkNo when present; skips CMF rows with no BL listing.
  */
-function resolveBrickLinkFetch(catalog = {}) {
-  const lookup = effectiveBrickLinkLookup(catalog);
+function resolveMarketFetch(catalog = {}) {
+  const lookup = resolveSourceLookup(catalog);
   if (lookup.skip) {
     return { skip: true, reason: lookup.reason || "skip_no_bl_item" };
   }
@@ -95,8 +95,8 @@ function isMistypedGearAsSet(catalog = {}) {
 module.exports = {
   BL_TYPE_PREFIX,
   normalizeItemNumber,
-  brickLinkCatalogPgUrl,
-  brickLinkOlderPriceGuideUrl,
+  marketCatalogPgUrl,
+  olderPriceGuideUrl,
   isMistypedGearAsSet,
-  resolveBrickLinkFetch,
+  resolveMarketFetch,
 };

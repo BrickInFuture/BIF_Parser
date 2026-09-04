@@ -1,11 +1,11 @@
 /**
- * Отчёт по прогону BrickLink → Telegram (и опционально email через FormSubmit).
+ * Отчёт по прогону парсера → Telegram (и опционально email через FormSubmit).
  *
  * Secrets (GitHub Actions):
  *   TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID  — основной канал
  *   INGEST_NOTIFY_EMAIL (optional)         — копия на почту через FormSubmit
  *
- *   node scripts/bricklink-parser/notifyIngestReport.js
+ *   node collector/notifyIngestReport.js
  */
 "use strict";
 
@@ -255,7 +255,7 @@ function buildReportText() {
   });
 
   const lines = [
-    `${circle} BrickLink парсер — ${statusRu(conclusion)}`,
+    `${circle} Парсер цен — ${statusRu(conclusion)}`,
     when,
     `Месяц: ${n(kpi.periodId || catalog.periodId)} · ${eventRu(event)}`,
     "",
@@ -319,7 +319,7 @@ async function sendEmailCopy(text) {
     console.log("Email: INGEST_NOTIFY_EMAIL not set — skip");
     return { ok: false, reason: "no_email" };
   }
-  const subject = `BrickLink парсер: ${process.env.JOB_CONCLUSION || "report"}`;
+  const subject = `Парсер цен: ${process.env.JOB_CONCLUSION || "report"}`;
   const form = new URLSearchParams();
   form.set("email", to);
   form.set("_subject", subject);

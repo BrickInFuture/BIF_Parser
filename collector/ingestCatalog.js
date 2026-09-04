@@ -1,5 +1,5 @@
 /**
- * Catalog BrickLink price ingest with type phases + checkpoint resume.
+ * Catalog price ingest with type phases + checkpoint resume.
  *
  * Coverage / calendar rules: see PARSING_RULES.md
  *
@@ -7,13 +7,13 @@
  * is exhausted for the month AND days remain (≤27 Moscow).
  * GHA scheduled runs use --phase=primary only (days 1–15).
  *
- *   npm run ingest:bricklink:catalog -- --confirm --limit=500
- *   npm run ingest:bricklink:catalog -- --confirm --phase=primary
- *   npm run ingest:bricklink:catalog -- --confirm --phase=secondary
- *   npm run ingest:bricklink:catalog -- --confirm --types=SET,MINIFIG
- *   npm run ingest:bricklink:catalog -- --confirm --shardIndex=0 --shardCount=2
+ *   npm run ingest:catalog -- --confirm --limit=500
+ *   npm run ingest:catalog -- --confirm --phase=primary
+ *   npm run ingest:catalog -- --confirm --phase=secondary
+ *   npm run ingest:catalog -- --confirm --types=SET,MINIFIG
+ *   npm run ingest:catalog -- --confirm --shardIndex=0 --shardCount=2
  *
- * Checkpoint: price_ingest_runs/bricklink_{YYYY-MM} (or …_s{N} for shards)
+ * Checkpoint: price_ingest_runs/market_{YYYY-MM} (or …_s{N} for shards)
  * Skips by coverage policy: novelty needs current month (after launch+2d);
  * mature only if last market ok older than ~6 months. Empty novelty → RRP×0.9 bootstrap.
  * Priority: gap queue (ledger holes) first, then catalog cursor.
@@ -32,13 +32,13 @@
 "use strict";
 
 const { initFirebaseAdmin } = require("./firebaseAdmin");
-const { BrickLinkSession, HTTP_METHOD } = require("./session");
+const { CollectorSession, HTTP_METHOD } = require("./session");
 const { normalizeSetNo, errorLooksLikeSoftBlock } = require("./parseHtml");
 const {
   isMistypedGearAsSet,
   normalizeItemNumber,
   BL_TYPE_PREFIX,
-  resolveBrickLinkFetch,
+  resolveMarketFetch,
 } = require("./blUrls");
 const { writeObservationFromParse, writeRrpBootstrapObservation } = require("./observationWriter");
 const { utcYearMonth } = require("./gapLedger");
@@ -105,7 +105,7 @@ async function alreadyOkThisPeriod(db, catalogItemId, periodId, cat) {
   if (st === "no_data") {
     const tag = String(d.errorTag || "");
     if (tag === "missing_col") {
-      const fetch = resolveBrickLinkFetch(cat || {});
+      const fetch = resolveMarketFetch(cat || {});
       if (!fetch.skip && fetch.itemNumber) return false;
     }
     // rrp_bootstrap counts as month filled for novelty; plain no_data too (legacy)
@@ -180,7 +180,7 @@ function mapCatalogDoc(doc) {
     launchDate: d.launchDate ?? null,
     yearReleased: d.yearReleased ?? d.year ?? null,
   };
-  const blFetch = resolveBrickLinkFetch(catalog);
+  const blFetch = resolveMarketFetch(catalog);
   const fetchType = blFetch.skip ? itemType : blFetch.itemType || itemType;
   return {
     catalogItemId: doc.id,
@@ -263,7 +263,7 @@ async function main() {
   console.log(
     JSON.stringify(
       {
-        step: "bricklink_catalog_ingest_start",
+        step: "catalog_ingest_start",
         periodId,
         runId,
         confirm: CONFIRM,
@@ -520,7 +520,7 @@ async function main() {
     }
   }
 
-  const session = new BrickLinkSession({
+  const session = new CollectorSession({
     headless: HEADLESS,
     pauseMs: process.env.BL_PAUSE_MS ? undefined : [1500, 3000],
   });
@@ -910,7 +910,7 @@ async function main() {
                 itemType: cat.itemType,
                 setNo,
                 parsed: { ok: true, empty: true },
-                method: "bricklink_lookup_skip",
+                method: "lookup_skip",
                 errorTag: skipReason,
               },
               { writeBif: false, dryRun: false }

@@ -2,7 +2,7 @@
  * Очередь задач из ledger-дыр (набор × месяц).
  * Канон: BIF_parser.md § Ledger.
  *
- * Один HTML-скрейп BrickLink пишет **все** помесячные sold-блоки со страницы
+ * Один HTML-скрейп market пишет **все** помесячные sold-блоки со страницы
  * (не только последние 6 месяцев — на старых наборах бывают годы истории).
  */
 "use strict";
@@ -71,7 +71,7 @@ async function findGapSlotsForItem(db, cat, currentPeriodId, nowMs = Date.now())
   );
 }
 
-/** Есть ли месяцы, которые HTML BrickLink может закрыть (≤ текущий UTC). */
+/** Есть ли месяцы, которые HTML-страница может закрыть (≤ текущий UTC). */
 function hasBlFillableGap(slots, nowMs = Date.now()) {
   const currentUtc = utcYearMonth(new Date(nowMs));
   return (slots || []).some(

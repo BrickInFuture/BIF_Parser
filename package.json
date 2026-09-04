@@ -1,17 +1,14 @@
 {
-  "name": "brickinfuture-parser",
+  "name": "bif-collector",
   "version": "1.0.0",
   "private": true,
-  "description": "BrickInFuture BrickLink price parser (raw-only). Writes sold/stock to Firestore; BIF is computed privately.",
+  "description": "Internal price collector (raw observations only).",
   "type": "commonjs",
   "scripts": {
-    "ingest:bricklink:catalog": "node bricklink-parser/ingestCatalog.js",
-    "ingest:bricklink:retry-errors": "node bricklink-parser/ingestRetryErrors.js",
-    "ingest:bricklink:queue": "node bricklink-parser/ingestQueue.js",
-    "ingest:bricklink:kpi": "node bricklink-parser/ingestKpi.js",
-    "ingest:bricklink:month-gaps": "node bricklink-parser/ingestMonthGapAudit.js",
-    "ingest:bricklink:gap-queue": "node bricklink-parser/gapQueuePreview.js",
-    "probe:bricklink:http-token": "node bricklink-parser/probe-http-token.js"
+    "ingest:catalog": "node collector/ingestCatalog.js",
+    "ingest:retry": "node collector/ingestRetryErrors.js",
+    "ingest:queue": "node collector/ingestQueue.js",
+    "ingest:kpi": "node collector/ingestKpi.js"
   },
   "dependencies": {
     "cheerio": "^1.2.0",

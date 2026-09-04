@@ -1,9 +1,9 @@
 /**
- * BrickLink coverage KPI for Actions step summary + run doc (default 28 days).
+ * Coverage KPI for Actions step summary + run doc (default 28 days).
  * Окно ≈ календарный месяц: цена «свежая», если снимали не старше ~месяца.
  *
- *   npm run ingest:bricklink:kpi -- --days=28
- *   npm run ingest:bricklink:kpi -- --days=28 --write-run
+ *   npm run ingest:kpi -- --days=28
+ *   npm run ingest:kpi -- --days=28 --write-run
  */
 "use strict";
 
@@ -233,7 +233,7 @@ async function main() {
     onTrack14d: onTrack,
   };
 
-  console.log(`\n--- bricklink ${DAYS}d KPI ---`);
+  console.log(`\n--- collector ${DAYS}d KPI ---`);
   console.log(JSON.stringify(kpi, null, 2));
   writeIngestArtifact("kpi", kpi);
 
@@ -272,7 +272,7 @@ async function main() {
   if (summaryPath) {
     const lines = [
       "",
-      `## BrickLink ${DAYS}d coverage KPI`,
+      `## Collector ${DAYS}d coverage KPI`,
       `- primary types: \`${PRIMARY_TYPES.join(", ")}\``,
       `- catalog primary (SET+MINIFIG): \`${catalogPrimary}\``,
       `- fresh primary **with prices**: \`${freshOkPrimary}\` (**${pricedPctPrimary ?? "n/a"}%**)`,
