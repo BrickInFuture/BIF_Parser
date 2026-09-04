@@ -116,7 +116,13 @@ function scoreGapTask(cat, slots, currentPeriodId, coverage, nowMs = Date.now())
     score += 5000;
     score += Math.min(gaps.length, 12) * 40;
     if (coverage && !coverage.skip && coverage.reason === "novelty_need_month") score += 500;
-    if (coverage && !coverage.skip && coverage.reason === "mature_stale") score += 300;
+    if (
+      coverage &&
+      !coverage.skip &&
+      (coverage.reason === "need_current_month" || coverage.reason === "mature_stale")
+    ) {
+      score += 300;
+    }
     return score;
   }
 

@@ -93,7 +93,10 @@ function scoreCatalogPriority(cat, coverage = {}) {
       score += Math.floor(freshness / DAY_MS);
     }
     if (coverage.reason === "novelty_need_month") score += 200;
-  } else if (classif.cohort === "mature" && coverage.reason === "mature_stale") {
+  } else if (
+    classif.cohort === "mature" &&
+    (coverage.reason === "need_current_month" || coverage.reason === "mature_stale")
+  ) {
     score += 120;
   }
 
