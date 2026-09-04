@@ -91,6 +91,8 @@ async function main() {
   /** Разные primary с ценой, снятой в текущем UTC-месяце. */
   let monthOkPrimary = 0;
   let monthNoDataPrimary = 0;
+  /** Primary с ценой в базе без ограничения по давности. */
+  let anyOkPrimary = 0;
   let last = null;
   let freshOkCapturedMin = null;
   let freshOkCapturedMax = null;
@@ -135,6 +137,10 @@ async function main() {
             }
           }
         }
+      }
+
+      if (isPrimary && st === "ok" && d.empty !== true) {
+        anyOkPrimary += 1;
       }
 
       if (isPrimary && inMonth && (st === "ok" || st === "no_data")) {
@@ -186,6 +192,8 @@ async function main() {
     catalogPrimary > 0 ? Math.round((freshOkPrimary / catalogPrimary) * 1000) / 10 : null;
   const monthPricedPctPrimary =
     catalogPrimary > 0 ? Math.round((monthOkPrimary / catalogPrimary) * 1000) / 10 : null;
+  const anyPricedPctPrimary =
+    catalogPrimary > 0 ? Math.round((anyOkPrimary / catalogPrimary) * 1000) / 10 : null;
   const okWithPricesPerDay =
     Number(run.okWithPrices) > 0
       ? Math.round((Number(run.okWithPrices) / runDays) * 10) / 10
@@ -226,6 +234,8 @@ async function main() {
     monthNoDataPrimary,
     monthPricedPctPrimary,
     monthUniqueDelta,
+    anyOkPrimary,
+    anyPricedPctPrimary,
     errorBacklog,
     errorBacklogPrimary,
     okPerDay: okPerDayRun,
@@ -268,6 +278,8 @@ async function main() {
         monthOkPrimary,
         monthPricedPctPrimary,
         monthUniqueWithPrices: monthOkPrimary,
+        anyOkPrimary,
+        anyPricedPctPrimary,
         freshCovered,
         freshCoveredPrimary,
         freshOk,

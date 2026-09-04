@@ -2,8 +2,6 @@
  * Итог месяца (после дня 26 UTC, когда автосбор останавливается).
  *
  *   node collector/notifyMonthEndReport.js
- *
- * Ждёт артефакт .ingest-kpi.json (шаг ingest:kpi --write-run).
  */
 "use strict";
 
@@ -25,13 +23,22 @@ function n(v) {
 function buildMonthEndText(kpi = {}, env = process.env) {
   const when = formatReportDateRu(new Date());
   const periodLabel = periodIdRu(kpi.periodId, "nominative");
+  const monthIn = periodIdRu(kpi.periodId, "prepositional");
+  const periodGen = periodIdRu(kpi.periodId, "genitive");
   const monthOk = Number(kpi.monthOkPrimary);
+  const anyOk = Number(kpi.anyOkPrimary);
   const catalog = Number(kpi.catalogPrimary);
   const monthPct =
     kpi.monthPricedPctPrimary != null && Number.isFinite(Number(kpi.monthPricedPctPrimary))
       ? Number(kpi.monthPricedPctPrimary)
       : catalog > 0 && Number.isFinite(monthOk)
         ? Math.round((monthOk / catalog) * 1000) / 10
+        : null;
+  const anyPct =
+    kpi.anyPricedPctPrimary != null && Number.isFinite(Number(kpi.anyPricedPctPrimary))
+      ? Number(kpi.anyPricedPctPrimary)
+      : catalog > 0 && Number.isFinite(anyOk)
+        ? Math.round((anyOk / catalog) * 1000) / 10
         : null;
   const mark = coverageCircles(monthPct);
   const trips = Number(kpi.runOkWithPrices != null ? kpi.runOkWithPrices : kpi.runOk);
@@ -45,21 +52,25 @@ function buildMonthEndText(kpi = {}, env = process.env) {
   const hitTarget = monthPct != null && monthPct >= target;
 
   const lines = [
-    `📊 Итог месяца — ${periodLabel}`,
+    `📊 Итог ${periodGen}`,
     when,
     "(автосбор дней 1–26 закончен)",
     "",
-    `${mark} Покрытие за месяц (наборы+минифиги, цель ≥${target}%):`,
-    `• разных с ценой: ${n(monthOk)} из ${n(catalog)}${
-      monthPct != null ? ` (${monthPct}%)` : ""
+    `Каталог (наборы + минифиги) ${mark}`,
+    "",
+    "Наборов со свежими ценами",
+    `• с любой ценой в базе: ${n(anyOk)} из ${n(catalog)}${
+      anyPct != null ? ` (${anyPct}%)` : ""
     }`,
-    `• цель ≥${target}%: ${hitTarget ? "достигнута" : "не достигнута"}`,
+    `• с ценой, снятой в ${monthIn}: ${n(monthOk)} из ${n(catalog)}${
+      monthPct != null ? ` (${monthPct}%)` : ""
+    } — цель ≥${target}%`,
+    `• цель ≥${target}% за ${periodLabel}: ${hitTarget ? "достигнута" : "не достигнута"}`,
   ];
 
   if (Number.isFinite(trips) && trips > 0) {
-    lines.push(
-      `• походов с ценой: ${trips} (один набор могли снять несколько раз)`
-    );
+    lines.push(`• успешных съёмов за ${periodLabel}: ${trips}`);
+    lines.push("  (сколько раз сходили и записали цену; один набор могли снять несколько раз)");
   }
   if (Number.isFinite(perDay) && perDay > 0) {
     lines.push(`• в среднем в день: ${perDay} (цель >${dayTarget})`);
@@ -73,7 +84,7 @@ function buildMonthEndText(kpi = {}, env = process.env) {
     lines.push(`• осталось в очереди ошибок: ${n(backlog)}`);
   }
 
-  lines.push("", "Дальше: с 1-го числа следующего месяца автосбор снова каждый день.");
+  lines.push("", "С 1-го числа следующего месяца автосбор снова каждый день.");
 
   const runUrl = env.GITHUB_RUN_URL || "";
   if (runUrl) lines.push("", `Лог: ${runUrl}`);
