@@ -3,8 +3,8 @@
 # Optional: TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID, BL_PROXY_URL.
 #
 # One cron per workflow file (hourly). Two files (A@:18 B@:48) ~= every 30 min.
-# Dense multi-cron in a single file was dropping after a few fires on this repo.
 # Days 1-26 UTC enforced in job "gate".
+# mode=month_end → только KPI + итоговый отчёт за месяц (пинк 26-го ~23:00 UTC).
 
 name: BIF collector B
 
@@ -17,6 +17,10 @@ on:
         description: "schedule = автопинк; owner = вручную (ты / агент)"
         required: false
         default: "owner"
+      mode:
+        description: "burst = обычный залп; month_end = итог месяца после дня 26"
+        required: false
+        default: "burst"
       limit:
         description: "Max items per short burst (SET+MINIFIG); stay under IP heat (~60)"
         required: false
@@ -27,22 +31,27 @@ on:
         default: "15"
 
 concurrency:
-  group: bif-collector-public
-  cancel-in-progress: true
+  group: ${{ github.event.inputs.mode == 'month_end' && 'bif-month-end' || 'bif-collector-public' }}
+  cancel-in-progress: ${{ github.event.inputs.mode != 'month_end' }}
 
 jobs:
   gate:
     runs-on: ubuntu-latest
     outputs:
       go: ${{ steps.check.outputs.go }}
+      mode: ${{ steps.check.outputs.mode }}
     steps:
       - name: Days 1-26 UTC for schedule
         id: check
         run: |
           d=$(date -u +%d)
           d=$((10#$d))
-          echo "UTC day=$d event=${{ github.event_name }}"
-          if [ "${{ github.event_name }}" = "schedule" ] && [ "$d" -gt 26 ]; then
+          mode="${{ github.event.inputs.mode || 'burst' }}"
+          echo "UTC day=$d event=${{ github.event_name }} mode=$mode"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          if [ "$mode" = "month_end" ]; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "schedule" ] && [ "$d" -gt 26 ]; then
             echo "go=false" >> "$GITHUB_OUTPUT"
             echo "Schedule idle after day 26"
           else
@@ -51,7 +60,7 @@ jobs:
 
   ingest:
     needs: gate
-    if: needs.gate.outputs.go == 'true'
+    if: needs.gate.outputs.go == 'true' && needs.gate.outputs.mode != 'month_end'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -136,3 +145,44 @@ jobs:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           BL_RUN_REASON: ${{ github.event.inputs.reason || '' }}
         run: node collector/notifyIngestReport.js
+
+  month_end:
+    needs: gate
+    if: needs.gate.outputs.go == 'true' && needs.gate.outputs.mode == 'month_end'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DEV_PROJECT_ID: brickinfuture-306f1
+      BL_RAW_ONLY: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install deps
+        run: npm install
+
+      - name: Write service account
+        env:
+          FIREBASE_SERVICE_ACCOUNT_DEV: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_DEV }}
+        run: |
+          if [ -z "$FIREBASE_SERVICE_ACCOUNT_DEV" ]; then
+            echo "Missing secret FIREBASE_SERVICE_ACCOUNT_DEV"; exit 1
+          fi
+          echo "$FIREBASE_SERVICE_ACCOUNT_DEV" > "$RUNNER_TEMP/sa.json"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
+
+      - name: Coverage KPI
+        run: npm run ingest:kpi -- --days=28 --write-run
+
+      - name: Month-end report
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node collector/notifyMonthEndReport.js

@@ -1,26 +1,19 @@
 /**
- * Отчёт по прогону парсера → Telegram (и опционально email через FormSubmit).
- *
- * Secrets (GitHub Actions):
- *   TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID  — основной канал
- *   INGEST_NOTIFY_EMAIL (optional)         — копия на почту через FormSubmit
+ * Отчёт по прогону парсера → Telegram.
  *
  *   node collector/notifyIngestReport.js
  *
- * Как отличить запуск:
- *   GITHUB_EVENT_NAME=schedule              → по расписанию
- *   BL_RUN_REASON=schedule                  → автопинк (Firebase / запасной kick)
- *   BL_RUN_REASON=owner (или пусто + dispatch) → вручную (ты / агент / кнопка)
+ * Запуск: schedule / BL_RUN_REASON=schedule → «по расписанию»;
+ *         owner / кнопка → «вручную».
  */
 "use strict";
 
 const fs = require("fs");
 const { readIngestArtifact } = require("./ingestReportArtifacts");
 
-/** Часовой пояс отчёта (владелец в UTC+4). */
 const REPORT_TZ = process.env.BL_REPORT_TZ || "Asia/Dubai";
 
-const MONTHS_RU = [
+const MONTHS_RU_GENITIVE = [
   "января",
   "февраля",
   "марта",
@@ -35,12 +28,29 @@ const MONTHS_RU = [
   "декабря",
 ];
 
+const MONTHS_RU_NOMINATIVE = [
+  "январь",
+  "февраль",
+  "март",
+  "апрель",
+  "май",
+  "июнь",
+  "июль",
+  "август",
+  "сентябрь",
+  "октябрь",
+  "ноябрь",
+  "декабрь",
+];
+
+const COVERAGE_PCT_TARGET = 98;
+const SUCCESS_PCT_TARGET = 90;
+
 function n(v) {
   if (v == null || v === "") return "—";
   return String(v);
 }
 
-/** Секунды → коротко по-русски: "19 с" / "3.2 мин". */
 function formatSecPerOk(sec) {
   const s = Number(sec);
   if (!Number.isFinite(s) || s <= 0) return "—";
@@ -48,7 +58,6 @@ function formatSecPerOk(sec) {
   return `${Math.round((s / 60) * 10) / 10} мин`;
 }
 
-/** "3 сентября 2026, 04:04 утра" */
 function formatReportDateRu(date = new Date(), timeZone = REPORT_TZ) {
   const parts = new Intl.DateTimeFormat("en-GB", {
     timeZone,
@@ -71,21 +80,21 @@ function formatReportDateRu(date = new Date(), timeZone = REPORT_TZ) {
   else if (hour >= 4 && hour < 12) dayPart = "утра";
   else if (hour >= 12 && hour < 17) dayPart = "дня";
   else dayPart = "вечера";
-  return `${day} ${MONTHS_RU[month - 1]} ${year}, ${hourStr}:${minute} ${dayPart}`;
+  return `${day} ${MONTHS_RU_GENITIVE[month - 1]} ${year}, ${hourStr}:${minute} ${dayPart}`;
 }
 
-/** Цель покрытия каталога свежими ценами. */
-const COVERAGE_PCT_TARGET = 98;
+/** 2026-09 → «сентябрь 2026» / «сентября 2026» */
+function periodIdRu(periodId, form = "nominative") {
+  const m = String(periodId || "").match(/^(\d{4})-(\d{2})$/);
+  if (!m) return periodId || "—";
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  if (month < 1 || month > 12) return periodId;
+  const name =
+    form === "genitive" ? MONTHS_RU_GENITIVE[month - 1] : MONTHS_RU_NOMINATIVE[month - 1];
+  return `${name} ${year}`;
+}
 
-/** Цель успеха окна / месяца в отчёте. */
-const SUCCESS_PCT_TARGET = 90;
-
-/**
- * Шкала покрытия (свежие цены / каталог наборы+минифиги):
- * ≥98 🟢🟢🟢 · ≥95 🟢🟢 · ≥90 🟢 ·
- * ≥85 🟡🟡🟡 · ≥75 🟡🟡 · ≥70 🟡 ·
- * ≥50 🔴 · <50 🚨
- */
 function coverageCircles(pricedPct) {
   if (pricedPct == null || !Number.isFinite(Number(pricedPct))) return "—";
   const p = Number(pricedPct);
@@ -99,9 +108,6 @@ function coverageCircles(pricedPct) {
   return "🚨";
 }
 
-/**
- * 🟢 успех ≥90%, 🟡 ниже, 🔴 отменён / ошибка / нет данных прогона.
- */
 function statusCircle(conclusion, chunkPct) {
   if (conclusion === "cancelled" || conclusion === "failure") return "🔴";
   if (chunkPct == null || !Number.isFinite(Number(chunkPct))) return "🟡";
@@ -116,10 +122,6 @@ function statusRu(conclusion) {
   return conclusion || "unknown";
 }
 
-/**
- * Коротко: по расписанию | вручную.
- * Автопинк Firebase шлёт workflow_dispatch с reason=schedule — иначе GitHub врёт «ручной».
- */
 function runKindRu(event, reason) {
   const ev = String(event || "").trim();
   const r = String(reason || "")
@@ -155,7 +157,6 @@ function tagRu(tag) {
   return t;
 }
 
-/** Короткий разбор: что случилось в этом окне. */
 function buildAnalysis({ conclusion, catalog, retry, chunkPct, chunkDone, chunkOk }) {
   const lines = [];
   const timedOut = catalog.timedOut === true;
@@ -167,7 +168,6 @@ function buildAnalysis({ conclusion, catalog, retry, chunkPct, chunkDone, chunkO
       chunkDone > 0 &&
       chunkDone < 60);
   const trips = Number(catalog.circuitTrips) || 0;
-  // Только метки ЭТОГО залпа — не месячные накопления.
   const windowTags = catalog.chunkErrorTagCounts || {};
   const tags = topErrorTags(windowTags);
   const soft = Number(windowTags.soft_blocked) || 0;
@@ -193,7 +193,7 @@ function buildAnalysis({ conclusion, catalog, retry, chunkPct, chunkDone, chunkO
     lines.push(
       `Остановились: сайт начал резать частоту (${trips} ${
         trips === 1 ? "волна" : trips < 5 ? "волны" : "волн"
-      }). Лучше подождать следующий залп.`
+      }).`
     );
   } else if (chunkPct != null && Number(chunkPct) >= SUCCESS_PCT_TARGET) {
     lines.push("Залп прошёл нормально — почти все запросы дали цены.");
@@ -211,7 +211,6 @@ function buildAnalysis({ conclusion, catalog, retry, chunkPct, chunkDone, chunkO
   if (scrapeSec > 0 && chunkOk > 0 && scrapeSec / chunkOk > 30) {
     lines.push("На одну цену ушло много времени — съели паузы и отказы.");
   }
-  // Повтор ошибок — отдельной строкой в отчёте, здесь не дублируем.
   if (tags.length && conclusion !== "cancelled") {
     const onlySoftParse =
       tags.every(([k]) => k === "soft_blocked" || k === "parse_error") &&
@@ -226,13 +225,22 @@ function buildAnalysis({ conclusion, catalog, retry, chunkPct, chunkDone, chunkO
   return lines;
 }
 
-function buildCoverageLines(kpi, chunkOk, pricedPct, coverMark, opts = {}) {
+/**
+ * Блок покрытия — календарный месяц UTC (сентябрь, октябрь, …).
+ */
+function buildCoverageLines(kpi, chunkOk, opts = {}) {
   const lines = [];
-  const fresh = Number(kpi.freshOkPrimary);
+  const periodLabel = periodIdRu(kpi.periodId, "genitive");
+  const monthOk = Number(kpi.monthOkPrimary);
   const catalog = Number(kpi.catalogPrimary);
-  const monthPriced = Number(
-    kpi.runOkWithPrices != null ? kpi.runOkWithPrices : kpi.runOk
-  );
+  const monthPct =
+    kpi.monthPricedPctPrimary != null && Number.isFinite(Number(kpi.monthPricedPctPrimary))
+      ? Number(kpi.monthPricedPctPrimary)
+      : catalog > 0 && Number.isFinite(monthOk)
+        ? Math.round((monthOk / catalog) * 1000) / 10
+        : null;
+  const coverMark = coverageCircles(monthPct);
+  const trips = Number(kpi.runOkWithPrices != null ? kpi.runOkWithPrices : kpi.runOk);
   const perDay = Number(kpi.okPerDayWithPrices);
   const dayTarget = Number(kpi.okPerDayTarget != null ? kpi.okPerDayTarget : 2000);
   const successPct = kpi.runSuccessPct;
@@ -240,62 +248,65 @@ function buildCoverageLines(kpi, chunkOk, pricedPct, coverMark, opts = {}) {
   const runFail = Number(kpi.runFail) || 0;
   const backlog = kpi.errorBacklogPrimary;
   const burstDidNotRun = opts.burstDidNotRun === true;
+  const delta = kpi.monthUniqueDelta;
 
   lines.push(
-    `Каталог ${coverMark} — свежие цены (за ~28 дней, цель ≥${COVERAGE_PCT_TARGET}%):`
+    `${coverMark} Покрытие ${periodLabel} (наборы+минифиги, цель ≥${COVERAGE_PCT_TARGET}%):`
   );
   if (burstDidNotRun) {
-    lines.push("• залп не писал цены — цифры ниже без изменений с прошлого успешного съёма");
+    lines.push("• залп не писал цены — ниже без изменений с прошлого успешного съёма");
   }
-  if (Number.isFinite(fresh) && Number.isFinite(catalog) && catalog > 0) {
+
+  if (Number.isFinite(monthOk) && Number.isFinite(catalog) && catalog > 0) {
     lines.push(
-      `• сейчас с ценой: ${fresh} из ${catalog}${
-        pricedPct != null ? ` (${pricedPct}%)` : ""
+      `• разных с ценой в этом месяце: ${monthOk} из ${catalog}${
+        monthPct != null ? ` (${monthPct}%)` : ""
       }`
     );
   } else {
-    lines.push(`• сейчас с ценой: ${n(kpi.freshOkPrimary)} из ${n(kpi.catalogPrimary)}`);
+    lines.push(`• разных с ценой в этом месяце: ${n(kpi.monthOkPrimary)} из ${n(kpi.catalogPrimary)}`);
   }
 
-  if (Number.isFinite(monthPriced) && monthPriced > 0) {
-    lines.push(`• съёмов с ценой за месяц: ${monthPriced}`);
+  if (!burstDidNotRun && chunkOk > 0 && delta != null && Number.isFinite(Number(delta))) {
+    const d = Number(delta);
+    if (d > 0) {
+      lines.push(`• в этом залпе новых для месяца: +${d}`);
+    } else if (d === 0) {
+      lines.push(
+        "• в этом залпе новых для месяца: 0 (снова снимали тех, у кого цена в этом месяце уже была)"
+      );
+    } else {
+      lines.push(`• в этом залпе изменение уникальных: ${d}`);
+    }
   }
+
+  if (Number.isFinite(trips) && trips > 0) {
+    lines.push(
+      `• походов с ценой за месяц: ${trips} (один набор могли снять несколько раз)`
+    );
+  }
+
   if (Number.isFinite(perDay) && perDay > 0) {
     const pace =
       perDay >= dayTarget
         ? "темп ок"
         : perDay >= dayTarget * 0.75
           ? "темп ниже цели"
-          : "темпа не хватает — покрытие почти не растёт";
+          : "темпа не хватает";
     lines.push(`• в среднем в день: ${perDay} (цель >${dayTarget}) — ${pace}`);
-  } else {
-    lines.push(`• в среднем в день: ${n(kpi.okPerDayWithPrices)} (цель >${dayTarget})`);
   }
 
   if (successPct != null && successPct !== "") {
     lines.push(
-      `• удачность за месяц: ${successPct}% (ок ${runOk}, мимо ${runFail}; цель >${SUCCESS_PCT_TARGET}%)`
+      `• удачность запросов за месяц: ${successPct}% (ок ${runOk}, мимо ${runFail}; цель >${SUCCESS_PCT_TARGET}%)`
     );
   }
   if (backlog != null && backlog !== "") {
     lines.push(`• ждут повтора после ошибки: ${n(backlog)}`);
   }
 
-  if (pricedPct != null && pricedPct < 50 && !burstDidNotRun) {
-    lines.push("• 🚨 меньше половины каталога со свежей ценой — критично");
-  }
-
-  if (
-    !burstDidNotRun &&
-    chunkOk >= 30 &&
-    Number.isFinite(perDay) &&
-    perDay < dayTarget * 0.75 &&
-    pricedPct != null &&
-    pricedPct < 90
-  ) {
-    lines.push(
-      "• часть цен устаревает (выпадает из окна ~28 дней), а залпы пока не успевают наращивать уникальных"
-    );
+  if (monthPct != null && monthPct < 50 && !burstDidNotRun) {
+    lines.push("• 🚨 меньше половины каталога с ценой за этот месяц — критично");
   }
 
   return lines;
@@ -327,11 +338,6 @@ function buildReportText(env = process.env) {
         : null;
 
   const circle = statusCircle(conclusion, chunkPct);
-  const pricedPct =
-    kpi.pricedPctPrimary != null && Number.isFinite(Number(kpi.pricedPctPrimary))
-      ? Number(kpi.pricedPctPrimary)
-      : null;
-  const coverMark = coverageCircles(pricedPct);
   const when = formatReportDateRu(new Date());
   const kind = runKindRu(event, reason);
   const analysis = buildAnalysis({
@@ -346,16 +352,18 @@ function buildReportText(env = process.env) {
   const lines = [
     `${circle} Парсер цен — ${statusRu(conclusion)}`,
     when,
-    kind,
+    `(${kind})`,
     "",
     "Этот залп:",
     `• запросов: ${n(catalog.chunkDone)}`,
-    `• с ценами: ${n(catalog.chunkOkWithPrices)}${
+    `• успешных: ${n(catalog.chunkOkWithPrices)}${
       chunkPct != null ? ` (${chunkPct}%, цель >${SUCCESS_PCT_TARGET}%)` : ""
-    }`,
+    } — удалось снять цену`,
   ];
   if (chunkNoData > 0) {
-    lines.push(`• без данных на сайте: ${chunkNoData}`);
+    lines.push(
+      `• без данных на сайте: ${chunkNoData} — страница открылась, но цены там нет`
+    );
   }
   if (secPerOk != null) {
     lines.push(`• скорость: ~${formatSecPerOk(secPerOk)} на одну цену`);
@@ -372,10 +380,7 @@ function buildReportText(env = process.env) {
   lines.push("", "Что произошло:", ...analysis.map((s) => `• ${s}`));
   const burstDidNotRun =
     (conclusion === "failure" || conclusion === "cancelled") && chunkDone === 0;
-  lines.push(
-    "",
-    ...buildCoverageLines(kpi, chunkOk, pricedPct, coverMark, { burstDidNotRun })
-  );
+  lines.push("", ...buildCoverageLines(kpi, chunkOk, { burstDidNotRun }));
 
   if (runUrl) {
     lines.push("", `Лог: ${runUrl}`);
@@ -463,6 +468,7 @@ async function main() {
 module.exports = {
   buildReportText,
   formatReportDateRu,
+  periodIdRu,
   statusCircle,
   coverageCircles,
   buildAnalysis,

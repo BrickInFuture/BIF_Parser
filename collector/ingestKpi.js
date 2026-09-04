@@ -1,8 +1,8 @@
 /**
- * Coverage KPI for Actions step summary + run doc (default 28 days).
- * Окно ≈ календарный месяц: цена «свежая», если снимали не старше ~месяца.
+ * Coverage KPI for Actions + Telegram report.
+ * Главная метрика владельца: сколько РАЗНЫХ наборов+минифиг получили цену
+ * в текущем календарном месяце UTC (не «скользящие 28 дней»).
  *
- *   npm run ingest:kpi -- --days=28
  *   npm run ingest:kpi -- --days=28 --write-run
  */
 "use strict";
@@ -43,10 +43,16 @@ function avgSec(totalMs, count) {
   return Math.round((totalMs / count / 1000) * 10) / 10;
 }
 
+/** Начало текущего UTC-месяца (мс). */
+function utcMonthStartMs(d = new Date()) {
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1, 0, 0, 0, 0);
+}
+
 async function main() {
   const { admin, db, FieldValue } = initFirebaseAdmin();
   const periodId = utcYearMonth();
   const cutoffMs = Date.now() - DAYS * 24 * 60 * 60 * 1000;
+  const monthStartMs = utcMonthStartMs();
 
   let catalogTotal = 0;
   let catalogPrimary = 0;
@@ -78,11 +84,13 @@ async function main() {
 
   let freshOk = 0;
   let freshNoData = 0;
-  let staleOrMissing = 0;
   let errorBacklog = 0;
   let freshOkPrimary = 0;
   let freshNoDataPrimary = 0;
   let errorBacklogPrimary = 0;
+  /** Разные primary с ценой, снятой в текущем UTC-месяце. */
+  let monthOkPrimary = 0;
+  let monthNoDataPrimary = 0;
   let last = null;
   let freshOkCapturedMin = null;
   let freshOkCapturedMax = null;
@@ -104,6 +112,7 @@ async function main() {
       const isPrimary = PRIMARY_TYPES.includes(itemType);
       const capturedMs = tsToMs(d.capturedAt) || tsToMs(d.updatedAt);
       const fresh = capturedMs != null && capturedMs >= cutoffMs;
+      const inMonth = capturedMs != null && capturedMs >= monthStartMs;
 
       if (st === "error" || st === "fail") {
         errorBacklog += 1;
@@ -127,6 +136,11 @@ async function main() {
           }
         }
       }
+
+      if (isPrimary && inMonth && (st === "ok" || st === "no_data")) {
+        if (st === "no_data" || d.empty === true) monthNoDataPrimary += 1;
+        else monthOkPrimary += 1;
+      }
     }
 
     last = snap.docs[snap.docs.length - 1];
@@ -134,7 +148,7 @@ async function main() {
   }
 
   const freshCovered = freshOk + freshNoData;
-  staleOrMissing = Math.max(0, catalogTotal - freshCovered);
+  const staleOrMissing = Math.max(0, catalogTotal - freshCovered);
   const coveragePct =
     catalogTotal > 0 ? Math.round((freshCovered / catalogTotal) * 1000) / 10 : null;
 
@@ -154,7 +168,6 @@ async function main() {
   const avgSecOk = avgSec(Number(timing.okTotalMs) || 0, Number(timing.okCount) || 0);
   const avgSecSoft = avgSec(Number(timing.softTotalMs) || 0, Number(timing.softCount) || 0);
 
-  // ok/day from month run ok spread over days since run started, else from fresh window.
   const runStartedMs = tsToMs(run.startedAt) || tsToMs(run.createdAt);
   const runDays =
     runStartedMs != null
@@ -168,25 +181,26 @@ async function main() {
       : DAYS;
   const okPerDayFresh =
     freshOk > 0 ? Math.round((freshOk / Math.min(DAYS, freshSpanDays || DAYS)) * 10) / 10 : null;
-  // Цель владельца: >2000 успешных цен в день.
-  const okPerDayTarget = Math.max(
-    1,
-    Number(process.env.BL_OK_PER_DAY_TARGET) || 2000
-  );
-  // Price coverage only: no_data does not count toward the 98% priced target.
+  const okPerDayTarget = Math.max(1, Number(process.env.BL_OK_PER_DAY_TARGET) || 2000);
   const pricedPctPrimary =
     catalogPrimary > 0 ? Math.round((freshOkPrimary / catalogPrimary) * 1000) / 10 : null;
+  const monthPricedPctPrimary =
+    catalogPrimary > 0 ? Math.round((monthOkPrimary / catalogPrimary) * 1000) / 10 : null;
   const okWithPricesPerDay =
     Number(run.okWithPrices) > 0
       ? Math.round((Number(run.okWithPrices) / runDays) * 10) / 10
       : null;
-  const coverageTargetPct = Math.max(
-    1,
-    Number(process.env.BL_COVERAGE_TARGET_PCT) || 98
-  );
+  const coverageTargetPct = Math.max(1, Number(process.env.BL_COVERAGE_TARGET_PCT) || 98);
+
+  const prevMonthUnique = Number(run.monthUniqueWithPrices);
+  const hadPrevMonthUnique = Number.isFinite(prevMonthUnique) && prevMonthUnique >= 0 && run.kpiUpdatedAt;
+  const monthUniqueDelta = hadPrevMonthUnique
+    ? monthOkPrimary - prevMonthUnique
+    : null;
+
   const onTrack =
-    pricedPctPrimary != null
-      ? pricedPctPrimary >= coverageTargetPct ||
+    monthPricedPctPrimary != null
+      ? monthPricedPctPrimary >= coverageTargetPct ||
         (okWithPricesPerDay != null && okWithPricesPerDay >= okPerDayTarget * 0.75)
       : false;
 
@@ -207,6 +221,11 @@ async function main() {
     staleOrMissingPrimary,
     coveragePctPrimary,
     pricedPctPrimary,
+    /** Главное для отчёта: разные SET+MINIFIG с ценой, снятой в этом UTC-месяце. */
+    monthOkPrimary,
+    monthNoDataPrimary,
+    monthPricedPctPrimary,
+    monthUniqueDelta,
     errorBacklog,
     errorBacklogPrimary,
     okPerDay: okPerDayRun,
@@ -246,6 +265,9 @@ async function main() {
         coveragePct,
         coveragePctPrimary,
         pricedPctPrimary,
+        monthOkPrimary,
+        monthPricedPctPrimary,
+        monthUniqueWithPrices: monthOkPrimary,
         freshCovered,
         freshCoveredPrimary,
         freshOk,
@@ -272,19 +294,13 @@ async function main() {
   if (summaryPath) {
     const lines = [
       "",
-      `## Collector ${DAYS}d coverage KPI`,
-      `- primary types: \`${PRIMARY_TYPES.join(", ")}\``,
+      `## Collector ${periodId} month + ${DAYS}d KPI`,
       `- catalog primary (SET+MINIFIG): \`${catalogPrimary}\``,
-      `- fresh primary **with prices**: \`${freshOkPrimary}\` (**${pricedPctPrimary ?? "n/a"}%**)`,
-      `- fresh primary ok+no_data: \`${freshCoveredPrimary}\` (${coveragePctPrimary ?? "n/a"}%)`,
-      `- primary stale/missing prices: \`${Math.max(0, catalogPrimary - freshOkPrimary)}\``,
-      `- primary error backlog: \`${errorBacklogPrimary}\``,
-      `- catalog all types: \`${catalogTotal}\` (secondary deferred)`,
+      `- **month unique with prices**: \`${monthOkPrimary}\` (**${monthPricedPctPrimary ?? "n/a"}%**)`,
+      `- month unique delta vs last KPI: \`${monthUniqueDelta ?? "n/a"}\``,
+      `- rolling ${DAYS}d priced: \`${freshOkPrimary}\` (${pricedPctPrimary ?? "n/a"}%)`,
       `- ok-with-prices/day: \`${okWithPricesPerDay ?? "n/a"}\` (target >${okPerDayTarget})`,
-      `- avgSec ok: \`${avgSecOk ?? "n/a"}\` · soft: \`${avgSecSoft ?? "n/a"}\` (goal soft &lt; 8s)`,
-      `- circuitTrips: \`${Number(run.circuitTrips) || 0}\` · phase: \`${run.ingestPhase || "n/a"}\``,
       `- month run success%: \`${successPct ?? "n/a"}\` (ok ${run.ok || 0} / fail ${run.fail || 0})`,
-      `- target: ≥${coverageTargetPct}% fresh **priced** primary coverage in ${DAYS}d`,
       "",
     ];
     fs.appendFileSync(summaryPath, `${lines.join("\n")}\n`, "utf8");
