@@ -108,7 +108,7 @@ function isCompleteOrSealedBox(src = {}) {
  * Random pack NNNN-0 → { SET, NNNN-1 }.
  * Complete / Sealed Box → { skip: true, reason: "skip_no_bl_item" }.
  */
-function resolveSourceLookup(src = {}) {
+function resolveCmfLookup(src = {}) {
   if (!isCmfTheme(src)) return {};
   if (isCmfFigure(src)) {
     const col = singleMinifigNumber(src);
@@ -144,13 +144,13 @@ function resolveSourceLookup(src = {}) {
   if (status === "missing_col" || status === "skip_no_bl_item") {
     return { skip: true, reason: status };
   }
-  return resolveSourceLookup(src);
+  return resolveCmfLookup(src);
 }
 
 function sourceCatalogFields(src = {}) {
   if (!isCmfTheme(src)) return {};
   const setType = normalizeSetType(src);
-  const lookup = resolveSourceLookup(src);
+  const lookup = resolveCmfLookup(src);
   const out = {};
   if (setType) out.bricksetSetType = setType;
   if (lookup.skip) {
@@ -203,7 +203,7 @@ module.exports = {
   isCmfPackOrCollection,
   parseMinifigNumbers,
   singleMinifigNumber,
-  resolveSourceLookup,
+  resolveCmfLookup,
   resolveSourceLookup,
   sourceCatalogFields,
   catalogItemTypeForCmf,
