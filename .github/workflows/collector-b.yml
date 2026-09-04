@@ -22,9 +22,9 @@ on:
         required: false
         default: "burst"
       limit:
-        description: "Max items per short burst (SET+MINIFIG); stay under IP heat (~60)"
+        description: "Max items per short burst (SET+MINIFIG); stay under IP heat (~70)"
         required: false
-        default: "60"
+        default: "70"
       maxMinutes:
         description: "Catalog burst max minutes"
         required: false
@@ -120,7 +120,7 @@ jobs:
 
       - name: Catalog ingest chunk
         env:
-          LIMIT: ${{ github.event.inputs.limit || '60' }}
+          LIMIT: ${{ github.event.inputs.limit || '70' }}
           MAX_MINUTES: ${{ github.event.inputs.maxMinutes || '15' }}
         run: npm run ingest:catalog -- --confirm --phase=primary --limit="$LIMIT" --maxMinutes="$MAX_MINUTES"
 
