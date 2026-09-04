@@ -70,13 +70,16 @@ function formatReportDateRu(date = new Date(), timeZone = REPORT_TZ) {
   return `${day} ${MONTHS_RU[month - 1]} ${year}, ${hourStr}:${minute} ${dayPart}`;
 }
 
+/** Цель успеха окна / месяца в отчёте. */
+const SUCCESS_PCT_TARGET = 90;
+
 /**
- * 🟢 успех ≥80%, 🟡 ниже, 🔴 отменён / ошибка / нет данных прогона.
+ * 🟢 успех ≥90%, 🟡 ниже, 🔴 отменён / ошибка / нет данных прогона.
  */
 function statusCircle(conclusion, chunkPct) {
   if (conclusion === "cancelled" || conclusion === "failure") return "🔴";
   if (chunkPct == null || !Number.isFinite(Number(chunkPct))) return "🟡";
-  if (Number(chunkPct) >= 80) return "🟢";
+  if (Number(chunkPct) >= SUCCESS_PCT_TARGET) return "🟢";
   return "🟡";
 }
 
@@ -146,10 +149,12 @@ function buildAnalysis({ conclusion, catalog, retry, chunkPct, chunkDone, chunkO
     lines.push(
       `Окно остановили из‑за жары IP: ${trips} ${waveWord} «сайт режет» (стоп после отказов).`
     );
-  } else if (chunkPct != null && Number(chunkPct) >= 80) {
+  } else if (chunkPct != null && Number(chunkPct) >= SUCCESS_PCT_TARGET) {
     lines.push("Залп прошёл нормально: большинство запросов дали цены.");
-  } else if (chunkPct != null && Number(chunkPct) < 80) {
-    lines.push("Успех ниже 80% — сайт часто резал или много пустых/битых страниц.");
+  } else if (chunkPct != null && Number(chunkPct) < SUCCESS_PCT_TARGET) {
+    lines.push(
+      `Успех ниже ${SUCCESS_PCT_TARGET}% — сайт часто резал или много пустых/битых страниц.`
+    );
   } else if (!chunkDone) {
     lines.push("Каталог в этом прогоне почти ничего не записал — сводки нет.");
   }
@@ -231,7 +236,7 @@ function buildReportText() {
     `• запросов: ${n(catalog.chunkDone)}`,
     `• с ценами: ${n(catalog.chunkOkWithPrices)}`,
     `• без данных: ${n(catalog.chunkNoData)}`,
-    `• успех: ${chunkPct != null ? `${chunkPct}%` : "—"}`,
+    `• успех: ${chunkPct != null ? `${chunkPct}%` : "—"} (цель >${SUCCESS_PCT_TARGET}%)`,
     `• на 1 цену: ${formatSecPerOk(secPerOk)}${okPerHour != null ? ` (~${n(okPerHour)} цен/час)` : ""}`,
     "",
     "Повтор ошибок:",
@@ -242,8 +247,8 @@ function buildReportText() {
     "",
     "Покрытие (наборы+минифиги):",
     `• с ценами: ${n(kpi.freshOkPrimary)} из ${n(kpi.catalogPrimary)} (${n(kpi.pricedPctPrimary)}%)`,
-    `• в день: ${n(kpi.okPerDayWithPrices)} (цель ≥${n(kpi.okPerDayTarget)})`,
-    `• успех за месяц: ${n(kpi.runSuccessPct)}% (ok ${n(kpi.runOk)} / fail ${n(kpi.runFail)})`,
+    `• в день: ${n(kpi.okPerDayWithPrices)} (цель >${n(kpi.okPerDayTarget != null ? kpi.okPerDayTarget : 2000)})`,
+    `• успех за месяц: ${n(kpi.runSuccessPct)}% (цель >${SUCCESS_PCT_TARGET}%; ok ${n(kpi.runOk)} / fail ${n(kpi.runFail)})`,
     `• очередь ошибок: ${n(kpi.errorBacklogPrimary)}`,
   ];
   if (runUrl) {

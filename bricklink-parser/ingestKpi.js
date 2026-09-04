@@ -167,8 +167,11 @@ async function main() {
       : DAYS;
   const okPerDayFresh =
     freshOk > 0 ? Math.round((freshOk / Math.min(DAYS, freshSpanDays || DAYS)) * 10) / 10 : null;
-  const okPerDayTarget =
-    catalogPrimary > 0 ? Math.ceil(catalogPrimary / DAYS) : Math.ceil((catalogTotal || 16969) / DAYS);
+  // Цель владельца: >2000 успешных цен в день (не «каталог / 20 дней»).
+  const okPerDayTarget = Math.max(
+    1,
+    Number(process.env.BL_OK_PER_DAY_TARGET) || 2000
+  );
   // Price coverage only: no_data does not count toward the 95% priced target.
   const pricedPctPrimary =
     catalogPrimary > 0 ? Math.round((freshOkPrimary / catalogPrimary) * 1000) / 10 : null;
@@ -271,7 +274,7 @@ async function main() {
       `- primary stale/missing prices: \`${Math.max(0, catalogPrimary - freshOkPrimary)}\``,
       `- primary error backlog: \`${errorBacklogPrimary}\``,
       `- catalog all types: \`${catalogTotal}\` (secondary deferred)`,
-      `- ok-with-prices/day: \`${okWithPricesPerDay ?? "n/a"}\` (target ≥${okPerDayTarget})`,
+      `- ok-with-prices/day: \`${okWithPricesPerDay ?? "n/a"}\` (target >${okPerDayTarget})`,
       `- avgSec ok: \`${avgSecOk ?? "n/a"}\` · soft: \`${avgSecSoft ?? "n/a"}\` (goal soft &lt; 8s)`,
       `- circuitTrips: \`${Number(run.circuitTrips) || 0}\` · phase: \`${run.ingestPhase || "n/a"}\``,
       `- month run success%: \`${successPct ?? "n/a"}\` (ok ${run.ok || 0} / fail ${run.fail || 0})`,
