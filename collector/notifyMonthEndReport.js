@@ -22,11 +22,11 @@ function n(v) {
 
 function buildMonthEndText(kpi = {}, env = process.env) {
   const when = formatReportDateRu(new Date());
-  const periodLabel = periodIdRu(kpi.periodId, "nominative");
-  const monthIn = periodIdRu(kpi.periodId, "prepositional");
+  const monthNom = periodIdRu(kpi.periodId, "nominative");
   const periodGen = periodIdRu(kpi.periodId, "genitive");
   const monthOk = Number(kpi.monthOkPrimary);
   const anyOk = Number(kpi.anyOkPrimary);
+  const freshOk = Number(kpi.freshOkPrimary);
   const catalog = Number(kpi.catalogPrimary);
   const monthPct =
     kpi.monthPricedPctPrimary != null && Number.isFinite(Number(kpi.monthPricedPctPrimary))
@@ -39,6 +39,12 @@ function buildMonthEndText(kpi = {}, env = process.env) {
       ? Number(kpi.anyPricedPctPrimary)
       : catalog > 0 && Number.isFinite(anyOk)
         ? Math.round((anyOk / catalog) * 1000) / 10
+        : null;
+  const freshPct =
+    kpi.pricedPctPrimary != null && Number.isFinite(Number(kpi.pricedPctPrimary))
+      ? Number(kpi.pricedPctPrimary)
+      : catalog > 0 && Number.isFinite(freshOk)
+        ? Math.round((freshOk / catalog) * 1000) / 10
         : null;
   const mark = coverageCircles(monthPct);
   const trips = Number(kpi.runOkWithPrices != null ? kpi.runOkWithPrices : kpi.runOk);
@@ -62,14 +68,17 @@ function buildMonthEndText(kpi = {}, env = process.env) {
     `• с любой ценой в базе: ${n(anyOk)} из ${n(catalog)}${
       anyPct != null ? ` (${anyPct}%)` : ""
     }`,
-    `• с ценой, снятой в ${monthIn}: ${n(monthOk)} из ${n(catalog)}${
+    `• с ценой текущего месяца (${monthNom}): ${n(monthOk)} из ${n(catalog)}${
       monthPct != null ? ` (${monthPct}%)` : ""
     } — цель ≥${target}%`,
-    `• цель ≥${target}% за ${periodLabel}: ${hitTarget ? "достигнута" : "не достигнута"}`,
+    `• со свежей ценой: ${n(freshOk)} из ${n(catalog)}${
+      freshPct != null ? ` (${freshPct}%)` : ""
+    }`,
+    `• цель ≥${target}% за ${monthNom}: ${hitTarget ? "достигнута" : "не достигнута"}`,
   ];
 
   if (Number.isFinite(trips) && trips > 0) {
-    lines.push(`• успешных съёмов за ${periodLabel}: ${trips}`);
+    lines.push(`• успешных съёмов за ${monthNom}: ${trips}`);
     lines.push("  (сколько раз сходили и записали цену; один набор могли снять несколько раз)");
   }
   if (Number.isFinite(perDay) && perDay > 0) {

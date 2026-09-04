@@ -243,15 +243,14 @@ function buildAnalysis({ conclusion, catalog, retry, chunkPct, chunkDone, chunkO
 }
 
 /**
- * Блок каталога: любая цена в базе + цена за текущий месяц.
+ * Блок каталога: любая цена / цена текущего месяца / свежая (~28 дней).
  */
 function buildCoverageLines(kpi, chunkOk, opts = {}) {
   const lines = [];
-  const periodLabel = periodIdRu(kpi.periodId, "genitive");
   const monthNom = periodIdRu(kpi.periodId, "nominative");
-  const monthIn = periodIdRu(kpi.periodId, "prepositional");
   const monthOk = Number(kpi.monthOkPrimary);
   const anyOk = Number(kpi.anyOkPrimary);
+  const freshOk = Number(kpi.freshOkPrimary);
   const catalog = Number(kpi.catalogPrimary);
   const monthPct =
     kpi.monthPricedPctPrimary != null && Number.isFinite(Number(kpi.monthPricedPctPrimary))
@@ -265,6 +264,12 @@ function buildCoverageLines(kpi, chunkOk, opts = {}) {
       : catalog > 0 && Number.isFinite(anyOk)
         ? Math.round((anyOk / catalog) * 1000) / 10
         : null;
+  const freshPct =
+    kpi.pricedPctPrimary != null && Number.isFinite(Number(kpi.pricedPctPrimary))
+      ? Number(kpi.pricedPctPrimary)
+      : catalog > 0 && Number.isFinite(freshOk)
+        ? Math.round((freshOk / catalog) * 1000) / 10
+        : null;
   const coverMark = coverageCircles(monthPct);
   const trips = Number(kpi.runOkWithPrices != null ? kpi.runOkWithPrices : kpi.runOk);
   const perDay = Number(kpi.okPerDayWithPrices);
@@ -274,7 +279,6 @@ function buildCoverageLines(kpi, chunkOk, opts = {}) {
   const runFail = Number(kpi.runFail) || 0;
   const backlog = kpi.errorBacklogPrimary;
   const burstDidNotRun = opts.burstDidNotRun === true;
-  const delta = kpi.monthUniqueDelta;
 
   lines.push(`Каталог (наборы + минифиги) ${coverMark}`);
   if (burstDidNotRun) {
@@ -292,27 +296,24 @@ function buildCoverageLines(kpi, chunkOk, opts = {}) {
 
   if (Number.isFinite(monthOk) && Number.isFinite(catalog) && catalog > 0) {
     lines.push(
-      `• с ценой, снятой в ${monthIn}: ${monthOk} из ${catalog}${
+      `• с ценой текущего месяца (${monthNom}): ${monthOk} из ${catalog}${
         monthPct != null ? ` (${monthPct}%)` : ""
       } — цель ≥${COVERAGE_PCT_TARGET}%`
     );
   } else {
     lines.push(
-      `• с ценой, снятой в этом месяце: ${n(kpi.monthOkPrimary)} из ${n(
+      `• с ценой текущего месяца: ${n(kpi.monthOkPrimary)} из ${n(
         kpi.catalogPrimary
       )} — цель ≥${COVERAGE_PCT_TARGET}%`
     );
   }
 
-  if (!burstDidNotRun && chunkOk > 0 && delta != null && Number.isFinite(Number(delta))) {
-    const d = Number(delta);
-    if (d > 0) {
-      lines.push(`• за этот залп впервые получили цену за ${monthNom}: +${d}`);
-    } else if (d === 0) {
-      lines.push(
-        `• за этот залп новых с ценой за ${monthNom}: 0 (снимали тех, у кого цена за этот месяц уже была)`
-      );
-    }
+  if (Number.isFinite(freshOk) && Number.isFinite(catalog) && catalog > 0) {
+    lines.push(
+      `• со свежей ценой: ${freshOk} из ${catalog}${freshPct != null ? ` (${freshPct}%)` : ""}`
+    );
+  } else if (kpi.freshOkPrimary != null) {
+    lines.push(`• со свежей ценой: ${n(kpi.freshOkPrimary)} из ${n(kpi.catalogPrimary)}`);
   }
 
   if (Number.isFinite(trips) && trips > 0) {
