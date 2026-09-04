@@ -888,10 +888,8 @@ async function main() {
           const coverage =
             cat._coverage || (await resolveCatalogCoverage(db, cat, periodId));
           if (coverage.skip) {
-            const slots =
-              source === "gap" && cat._coverage
-                ? null
-                : await findGapSlotsForItem(db, cat, periodId);
+            // Всегда смотрим ledger текущего месяца: null-slots больше не = «скрепить всегда».
+            const slots = await findGapSlotsForItem(db, cat, periodId);
             if (!scrapeDespiteCoverageSkip(source, coverage, slots)) {
               skipped += 1;
               processed += 1;
@@ -903,7 +901,9 @@ async function main() {
           } else {
             cat._coverage = coverage;
           }
-        } else if (await alreadyOkThisPeriod(db, cat.catalogItemId, periodId, cat)) {
+        }
+        // Даже после gap-override: месяц уже записан — не жжём лимит повторно.
+        if (await alreadyOkThisPeriod(db, cat.catalogItemId, periodId, cat)) {
           skipped += 1;
           processed += 1;
           console.log(`SKIP ${setNo} (already ok ${periodId})`);

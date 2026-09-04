@@ -80,11 +80,24 @@ function hasBlFillableGap(slots, nowMs = Date.now()) {
 }
 
 /**
- * Coverage говорит skip (mature_fresh_6mo), но ledger всё ещё с дырами — скрейпим.
- * Gap-очередь уже отфильтровала такие наборы; cursor-путь проверяет ledger отдельно.
+ * Текущий UTC-месяц уже закрыт в ledger (есть sold/stock/no_data/bootstrap).
+ * Тогда повторный скрейп ради старых дыр — сжигание лимита: один HTML всё равно
+ * не создаст сделки там, где их не было.
+ */
+function currentUtcMonthClosed(slots, nowMs = Date.now()) {
+  const currentUtc = utcYearMonth(new Date(nowMs));
+  const slot = (slots || []).find((s) => s.periodId === currentUtc);
+  if (!slot) return false;
+  return slot.status !== LEDGER_STATUS.GAP && slot.status !== LEDGER_STATUS.ERROR;
+}
+
+/**
+ * Coverage говорит skip, но ledger с дырами — скрейпим только если
+ * **текущий UTC-месяц ещё пуст**. Старые дыры у уже покрытых наборов не жгут лимит.
  */
 function scrapeDespiteCoverageSkip(source, coverage, slots, nowMs = Date.now()) {
   if (!coverage || !coverage.skip) return false;
+  if (currentUtcMonthClosed(slots, nowMs)) return false;
   if (String(source || "") === "gap") return true;
   return hasBlFillableGap(slots, nowMs);
 }
@@ -164,6 +177,9 @@ async function fetchGapQueue(db, admin, opts) {
 
         const slots = await findGapSlotsForItem(db, cat, currentPeriodId, nowMs);
         const gaps = slots.filter((s) => s.status === LEDGER_STATUS.GAP);
+        // Уже есть цена/точка за текущий UTC-месяц — не берём снова (старые дыры later).
+        if (currentUtcMonthClosed(slots, nowMs)) continue;
+
         const blFillableGap = hasBlFillableGap(slots, nowMs);
 
         let coverage;
@@ -174,6 +190,7 @@ async function fetchGapQueue(db, admin, opts) {
             nowMs,
           });
           if (realCoverage.skip) {
+            // Текущий месяц пуст в ledger, но coverage skip (редко) — всё равно берём.
             coverage = {
               ...realCoverage,
               skip: false,
@@ -218,6 +235,7 @@ async function fetchGapQueue(db, admin, opts) {
 module.exports = {
   periodsToCheckForGaps,
   findGapSlotsForItem,
+  currentUtcMonthClosed,
   hasBlFillableGap,
   scrapeDespiteCoverageSkip,
   scoreGapTask,

@@ -318,7 +318,7 @@ function buildCoverageLines(kpi, chunkOk, opts = {}) {
 
   if (Number.isFinite(trips) && trips > 0) {
     lines.push(`• успешных съёмов за ${monthNom}: ${trips}`);
-    lines.push("  (сколько раз сходили и записали цену; один набор могли снять несколько раз)");
+    lines.push("  (число удачных походов за ценой за месяц)");
   }
 
   if (Number.isFinite(perDay) && perDay > 0) {
