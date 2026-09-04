@@ -21,12 +21,84 @@ const {
   aggregateHasSignal,
   observationDocFromPoint,
 } = require("./marketPoint");
-const { utcYearMonth, lastClosedUtcYearMonth } = require("./gapLedger");
+const {
+  utcYearMonth,
+  lastClosedUtcYearMonth,
+  addMonthsToPeriod,
+} = require("./gapLedger");
 const { RRP_BOOTSTRAP_METHOD } = require("./coveragePolicy");
+
+/** Месяц смотрели на BL, сделок нет — закрываем ledger, не крутим в gap-очереди. */
+const BL_MONTH_ABSENT_TAG = "bl_month_absent";
 
 function rowHasSoldSignal(row) {
   if (!row) return false;
   return aggregateHasSignal(row.soldNew) || aggregateHasSignal(row.soldUsed);
+}
+
+/**
+ * Дыры между самым ранним месяцем на странице и текущим UTC → no_data.
+ * (На BL месяца не было / пустой блок — повторно искать бессмысленно.)
+ */
+function sealAbsentMonthsBetween(points, currentPeriodId, baseMeta) {
+  const byId = new Map();
+  for (const p of points) {
+    if (p && p.periodId) byId.set(String(p.periodId), p);
+  }
+  const ids = [...byId.keys()].sort();
+  if (!ids.length) return points;
+
+  const fromPid = ids[0];
+  let pid = fromPid;
+  while (pid && pid <= currentPeriodId) {
+    if (!byId.has(pid)) {
+      const sealed = buildMonthlyMarketPoint({
+        catalogItemId: baseMeta.catalogItemId,
+        itemType: baseMeta.itemType,
+        periodId: pid,
+        source: "bricklink",
+        method: baseMeta.method,
+        scrapeStatus: "no_data",
+        empty: true,
+        setNo: baseMeta.setNo || null,
+        window: "calendar_month",
+        errorTag: BL_MONTH_ABSENT_TAG,
+      });
+      byId.set(pid, sealed);
+    }
+    if (pid === currentPeriodId) break;
+    const next = addMonthsToPeriod(pid, 1);
+    if (!next || next <= pid) break;
+    pid = next;
+  }
+
+  if (!byId.has(currentPeriodId)) {
+    const attachStock = true;
+    byId.set(
+      currentPeriodId,
+      buildMonthlyMarketPoint({
+        catalogItemId: baseMeta.catalogItemId,
+        itemType: baseMeta.itemType,
+        periodId: currentPeriodId,
+        source: "bricklink",
+        method: baseMeta.method,
+        scrapeStatus:
+          aggregateHasSignal(baseMeta.stockNew) || aggregateHasSignal(baseMeta.stockUsed)
+            ? "ok"
+            : "no_data",
+        empty: !(
+          aggregateHasSignal(baseMeta.stockNew) || aggregateHasSignal(baseMeta.stockUsed)
+        ),
+        stockNew: attachStock ? baseMeta.stockNew || null : null,
+        stockUsed: attachStock ? baseMeta.stockUsed || null : null,
+        setNo: baseMeta.setNo || null,
+        window: "calendar_month",
+        errorTag: null,
+      })
+    );
+  }
+
+  return [...byId.values()].sort((a, b) => a.periodId.localeCompare(b.periodId));
 }
 
 /** Одна сырая точка (ошибка / пустой рынок / без помесячной детализации). */
@@ -115,7 +187,7 @@ async function writeRawObservationFromParse(db, adminFirestore, payload, opts = 
   }
 
   const rows = [...monthlySold].sort((a, b) => a.periodId.localeCompare(b.periodId));
-  const points = rows.map((row) => {
+  let points = rows.map((row) => {
     const attachStock = row.periodId === currentPeriodId && !rowHasSoldSignal(row);
     return buildMonthlyMarketPoint({
       catalogItemId,
@@ -131,8 +203,17 @@ async function writeRawObservationFromParse(db, adminFirestore, payload, opts = 
       stockUsed: attachStock ? parsed.stockUsed || null : null,
       setNo: payload.setNo || null,
       window: "calendar_month",
-      errorTag: null,
+      errorTag: row.empty ? BL_MONTH_ABSENT_TAG : null,
     });
+  });
+
+  points = sealAbsentMonthsBetween(points, currentPeriodId, {
+    catalogItemId,
+    itemType,
+    method,
+    setNo: payload.setNo || null,
+    stockNew: parsed.stockNew || null,
+    stockUsed: parsed.stockUsed || null,
   });
 
   const bifPeriodId = lastClosedUtcYearMonth();
@@ -243,7 +324,9 @@ async function writeRawBootstrapMarker(db, adminFirestore, payload, opts = {}) {
 }
 
 module.exports = {
+  BL_MONTH_ABSENT_TAG,
   rowHasSoldSignal,
+  sealAbsentMonthsBetween,
   writeRawSingle,
   writeRawObservationFromParse,
   writeRawBootstrapMarker,

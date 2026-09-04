@@ -810,6 +810,8 @@ function parseMonthlySoldSections(html, opts = {}) {
     }
   }
 
+  // Пустые месяцы с заголовком на BL тоже оставляем (empty) —
+  // запись no_data, чтобы не крутить их в очереди дыр вечно.
   return [...byPeriod.values()]
     .map((row) => ({
       periodId: row.periodId,
@@ -817,7 +819,6 @@ function parseMonthlySoldSections(html, opts = {}) {
       soldUsed: row.soldUsed,
       empty: monthSectionIsEmpty(row.soldNew, row.soldUsed),
     }))
-    .filter((s) => !s.empty || rowHasSoldSignal(s))
     .sort((a, b) => a.periodId.localeCompare(b.periodId));
 }
 

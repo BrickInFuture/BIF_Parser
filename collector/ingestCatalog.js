@@ -54,7 +54,7 @@ const { resolveCatalogCoverage } = require("./coveragePolicy");
 const {
   sortCatalogByPriorityLight,
 } = require("./catalogPriority");
-const { fetchGapQueue, findGapSlotsForItem, scrapeDespiteCoverageSkip } = require("./gapQueue");
+const { fetchGapQueue, findGapSlotsForItem, scrapeDespiteCoverageSkip, hasBlFillableGap } = require("./gapQueue");
 const { writeIngestArtifact } = require("./ingestReportArtifacts");
 
 function flagValue(name, fallback = null) {
@@ -888,7 +888,6 @@ async function main() {
           const coverage =
             cat._coverage || (await resolveCatalogCoverage(db, cat, periodId));
           if (coverage.skip) {
-            // Всегда смотрим ledger текущего месяца: null-slots больше не = «скрепить всегда».
             const slots = await findGapSlotsForItem(db, cat, periodId);
             if (!scrapeDespiteCoverageSkip(source, coverage, slots)) {
               skipped += 1;
@@ -902,13 +901,25 @@ async function main() {
             cat._coverage = coverage;
           }
         }
-        // Даже после gap-override: месяц уже записан — не жжём лимит повторно.
+
+        // Cursor: текущий месяц уже есть → мимо.
+        // Gap: текущий есть, но остались несмотренные старые дыры → можно добрать.
         if (await alreadyOkThisPeriod(db, cat.catalogItemId, periodId, cat)) {
-          skipped += 1;
-          processed += 1;
-          console.log(`SKIP ${setNo} (already ok ${periodId})`);
-          if (source === "gap") gapHandled.add(cat.catalogItemId);
-          continue;
+          if (source === "gap") {
+            const slots = await findGapSlotsForItem(db, cat, periodId);
+            if (!hasBlFillableGap(slots)) {
+              skipped += 1;
+              processed += 1;
+              console.log(`SKIP ${setNo} (already ok ${periodId}, no unread gaps)`);
+              gapHandled.add(cat.catalogItemId);
+              continue;
+            }
+          } else {
+            skipped += 1;
+            processed += 1;
+            console.log(`SKIP ${setNo} (already ok ${periodId})`);
+            continue;
+          }
         }
 
         if (cat.blFetch?.skip) {

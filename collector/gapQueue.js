@@ -92,14 +92,14 @@ function currentUtcMonthClosed(slots, nowMs = Date.now()) {
 }
 
 /**
- * Coverage говорит skip, но ledger с дырами — скрейпим только если
- * **текущий UTC-месяц ещё пуст**. Старые дыры у уже покрытых наборов не жгут лимит.
+ * Coverage говорит skip, но в ledger есть **несмотренные** дыры (status=gap) —
+ * можно скрейпить. Месяцы no_data («смотрели, пусто») уже закрыты и сюда не попадают.
  */
 function scrapeDespiteCoverageSkip(source, coverage, slots, nowMs = Date.now()) {
   if (!coverage || !coverage.skip) return false;
-  if (currentUtcMonthClosed(slots, nowMs)) return false;
+  if (!hasBlFillableGap(slots, nowMs)) return false;
   if (String(source || "") === "gap") return true;
-  return hasBlFillableGap(slots, nowMs);
+  return true;
 }
 
 function scoreGapTask(cat, slots, currentPeriodId, coverage, nowMs = Date.now()) {
@@ -110,25 +110,21 @@ function scoreGapTask(cat, slots, currentPeriodId, coverage, nowMs = Date.now())
   const currentUtcGap = gaps.some((g) => g.periodId === currentUtc);
   const recentClosedGap = gaps.some((g) => g.periodId === lastClosed);
   const currentGap = gaps.some((g) => g.periodId === currentPeriodId);
-  // Уже есть свежая цена на родителе (KPI coverage), а в очереди только старые дыры:
-  // сильно вниз — иначе залпы по 60 крутят одних и тех же, % покрытия стоит.
-  const alreadyFresh =
-    coverage?.coverageWouldSkip === true ||
-    coverage?.reason === "ledger_gap_override";
-  if (alreadyFresh) {
-    score -= 4500;
-    if (currentUtcGap) score += 900;
-    else if (recentClosedGap) score += 600;
-    else if (currentGap) score += 300;
-    score += Math.min(gaps.length, 6) * 20;
+
+  // №1 — нет цены/точки за текущий UTC-месяц.
+  if (currentUtcGap) {
+    score += 5000;
+    score += Math.min(gaps.length, 12) * 40;
+    if (coverage && !coverage.skip && coverage.reason === "novelty_need_month") score += 500;
+    if (coverage && !coverage.skip && coverage.reason === "mature_stale") score += 300;
     return score;
   }
-  if (currentUtcGap) score += 2200;
-  else if (recentClosedGap) score += 2000;
-  else if (currentGap) score += 1200;
-  score += Math.min(gaps.length, 12) * 80;
-  if (coverage && !coverage.skip && coverage.reason === "novelty_need_month") score += 500;
-  if (coverage && !coverage.skip && coverage.reason === "mature_stale") score += 300;
+
+  // №2 — текущий месяц уже есть; только несмотренные старые дыры (не no_data).
+  score -= 2500;
+  if (recentClosedGap) score += 900;
+  else if (currentGap) score += 500;
+  score += Math.min(gaps.length, 12) * 50;
   return score;
 }
 
@@ -177,37 +173,30 @@ async function fetchGapQueue(db, admin, opts) {
 
         const slots = await findGapSlotsForItem(db, cat, currentPeriodId, nowMs);
         const gaps = slots.filter((s) => s.status === LEDGER_STATUS.GAP);
-        // Уже есть цена/точка за текущий UTC-месяц — не берём снова (старые дыры later).
-        if (currentUtcMonthClosed(slots, nowMs)) continue;
+        // no_data / ok / bootstrap — не дыры. Пустая очередь дыр → мимо.
+        if (!gaps.length || !hasBlFillableGap(slots, nowMs)) continue;
 
-        const blFillableGap = hasBlFillableGap(slots, nowMs);
+        const currentClosed = currentUtcMonthClosed(slots, nowMs);
 
         let coverage;
-        if (blFillableGap) {
-          // Реальная политика покрытия нужна для скоринга: иначе «уже свежие»
-          // с дырами в 2018 уезжают в начало очереди и % KPI не растёт.
-          const realCoverage = await resolveCatalogCoverage(db, cat, currentPeriodId, {
-            nowMs,
-          });
-          if (realCoverage.skip) {
-            // Текущий месяц пуст в ledger, но coverage skip (редко) — всё равно берём.
-            coverage = {
-              ...realCoverage,
-              skip: false,
-              reason: "ledger_gap_override",
-              coverageWouldSkip: true,
-            };
-          } else {
-            coverage = {
-              ...realCoverage,
-              reason: realCoverage.reason || "ledger_gap",
-              coverageWouldSkip: false,
-            };
-          }
+        const realCoverage = await resolveCatalogCoverage(db, cat, currentPeriodId, {
+          nowMs,
+        });
+        if (realCoverage.skip) {
+          // Текущий закрыт, но есть несмотренные старые дыры — низкий приоритет.
+          // Или coverage skip при пустом текущем (редко).
+          coverage = {
+            ...realCoverage,
+            skip: false,
+            reason: currentClosed ? "ledger_gap_historical" : "ledger_gap_override",
+            coverageWouldSkip: true,
+          };
         } else {
-          coverage = await resolveCatalogCoverage(db, cat, currentPeriodId, { nowMs });
-          if (coverage.skip) continue;
-          coverage = { ...coverage, coverageWouldSkip: false };
+          coverage = {
+            ...realCoverage,
+            reason: realCoverage.reason || "ledger_gap",
+            coverageWouldSkip: false,
+          };
         }
 
         candidates.push({
@@ -215,7 +204,7 @@ async function fetchGapQueue(db, admin, opts) {
           targetPeriodId: utcYearMonth(new Date(nowMs)),
           score: scoreGapTask(cat, slots, currentPeriodId, coverage, nowMs),
           gapCount: gaps.length,
-          currentMonthGap: blFillableGap,
+          currentMonthGap: !currentClosed,
           coverage,
           gapPeriods: gaps.map((g) => g.periodId),
         });
