@@ -1,8 +1,9 @@
 /**
- * BrickLink coverage KPI for Actions step summary + run doc (default 20 days).
+ * BrickLink coverage KPI for Actions step summary + run doc (default 28 days).
+ * Окно ≈ календарный месяц: цена «свежая», если снимали не старше ~месяца.
  *
- *   npm run ingest:bricklink:kpi -- --days=20
- *   npm run ingest:bricklink:kpi -- --days=20 --write-run
+ *   npm run ingest:bricklink:kpi -- --days=28
+ *   npm run ingest:bricklink:kpi -- --days=28 --write-run
  */
 "use strict";
 
@@ -24,7 +25,7 @@ function hasFlag(name) {
   return process.argv.includes(`--${name}`);
 }
 
-const DAYS = Math.max(1, Number(flagValue("days", "20")) || 20);
+const DAYS = Math.max(1, Number(flagValue("days", "28")) || 28);
 const WRITE_RUN = hasFlag("write-run");
 
 function tsToMs(v) {
@@ -167,7 +168,7 @@ async function main() {
       : DAYS;
   const okPerDayFresh =
     freshOk > 0 ? Math.round((freshOk / Math.min(DAYS, freshSpanDays || DAYS)) * 10) / 10 : null;
-  // Цель владельца: >2000 успешных цен в день (не «каталог / 20 дней»).
+  // Цель владельца: >2000 успешных цен в день.
   const okPerDayTarget = Math.max(
     1,
     Number(process.env.BL_OK_PER_DAY_TARGET) || 2000
@@ -223,6 +224,7 @@ async function main() {
     runRetryLeft: Number(run.retryLeft) || 0,
     errorTagCounts: run.errorTagCounts || {},
     targetCoveragePct: 95,
+    onTrack28d: onTrack,
     onTrack20d: onTrack,
     onTrack14d: onTrack,
   };

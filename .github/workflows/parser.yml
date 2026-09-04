@@ -102,7 +102,7 @@ jobs:
 
       - name: Coverage KPI
         if: always()
-        run: npm run ingest:bricklink:kpi -- --days=20 --write-run
+        run: npm run ingest:bricklink:kpi -- --days=28 --write-run
 
       - name: Notify report (Telegram)
         if: always()
