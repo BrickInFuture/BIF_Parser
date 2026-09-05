@@ -39,6 +39,7 @@ function rowHasSoldSignal(row) {
 /**
  * Дыры между самым ранним месяцем на странице и текущим UTC → no_data.
  * (На BL месяца не было / пустой блок — повторно искать бессмысленно.)
+ * Текущий месяц без sold → тоже no_data: витрину (stock) в monthly не пишем.
  */
 function sealAbsentMonthsBetween(points, currentPeriodId, baseMeta) {
   const byId = new Map();
@@ -51,8 +52,7 @@ function sealAbsentMonthsBetween(points, currentPeriodId, baseMeta) {
   const fromPid = ids[0];
   let pid = fromPid;
   while (pid && pid <= currentPeriodId) {
-    // Текущий UTC-месяц не запечатываем тут — ниже, с витриной (stock).
-    if (!byId.has(pid) && pid !== currentPeriodId) {
+    if (!byId.has(pid)) {
       const sealed = buildMonthlyMarketPoint({
         catalogItemId: baseMeta.catalogItemId,
         itemType: baseMeta.itemType,
@@ -73,28 +73,6 @@ function sealAbsentMonthsBetween(points, currentPeriodId, baseMeta) {
     pid = next;
   }
 
-  if (!byId.has(currentPeriodId)) {
-    const hasStock =
-      aggregateHasSignal(baseMeta.stockNew) || aggregateHasSignal(baseMeta.stockUsed);
-    byId.set(
-      currentPeriodId,
-      buildMonthlyMarketPoint({
-        catalogItemId: baseMeta.catalogItemId,
-        itemType: baseMeta.itemType,
-        periodId: currentPeriodId,
-        source: "bricklink",
-        method: baseMeta.method,
-        scrapeStatus: hasStock ? "ok" : "no_data",
-        empty: !hasStock,
-        stockNew: hasStock ? baseMeta.stockNew || null : null,
-        stockUsed: hasStock ? baseMeta.stockUsed || null : null,
-        setNo: baseMeta.setNo || null,
-        window: "calendar_month",
-        errorTag: hasStock ? null : BL_MONTH_ABSENT_TAG,
-      })
-    );
-  }
-
   return [...byId.values()].sort((a, b) => a.periodId.localeCompare(b.periodId));
 }
 
@@ -107,30 +85,34 @@ async function writeRawSingle(db, adminFirestore, payload, opts, periodId) {
   const obsId = observationDocId(catalogItemId, "bricklink");
   const method = payload.method || "http_token_catalogPG";
 
+  const hasSold =
+    aggregateHasSignal(parsed.soldNew) || aggregateHasSignal(parsed.soldUsed);
   const point = buildMonthlyMarketPoint({
     catalogItemId,
     itemType,
     periodId,
     source: "bricklink",
     method,
-    scrapeStatus: parsed.ok ? (parsed.empty ? "no_data" : "ok") : "error",
-    empty: !!parsed.empty,
+    scrapeStatus: parsed.ok ? (hasSold ? "ok" : "no_data") : "error",
+    empty: parsed.ok ? !hasSold : !!parsed.empty,
     soldNew: parsed.soldNew || null,
     soldUsed: parsed.soldUsed || null,
-    stockNew: parsed.stockNew || null,
-    stockUsed: parsed.stockUsed || null,
+    stockNew: null,
+    stockUsed: null,
     setNo: payload.setNo || null,
-    window: parsed.empty ? "no_data" : "calendar_month",
+    window: hasSold ? "calendar_month" : "no_data",
     errorTag: parsed.ok
-      ? parsed.empty
-        ? payload.errorTag || null
-        : null
+      ? hasSold
+        ? null
+        : payload.errorTag || BL_MONTH_ABSENT_TAG
       : payload.errorTag || null,
   });
 
   const packed = await writeMarketPoint(db, obsId, point, FieldValue, { dryRun: true });
   const observation = {
     ...packed.observation,
+    stockNew: null,
+    stockUsed: null,
     error: parsed.ok ? null : parsed.error || null,
   };
 
@@ -185,22 +167,22 @@ async function writeRawObservationFromParse(db, adminFirestore, payload, opts = 
 
   const rows = [...monthlySold].sort((a, b) => a.periodId.localeCompare(b.periodId));
   let points = rows.map((row) => {
-    const attachStock = row.periodId === currentPeriodId && !rowHasSoldSignal(row);
+    const hasSold = rowHasSoldSignal(row) && !row.empty;
     return buildMonthlyMarketPoint({
       catalogItemId,
       itemType,
       periodId: row.periodId,
       source: "bricklink",
       method,
-      scrapeStatus: row.empty ? "no_data" : "ok",
-      empty: !!row.empty,
-      soldNew: row.soldNew || null,
-      soldUsed: row.soldUsed || null,
-      stockNew: attachStock ? parsed.stockNew || null : null,
-      stockUsed: attachStock ? parsed.stockUsed || null : null,
+      scrapeStatus: hasSold ? "ok" : "no_data",
+      empty: !hasSold,
+      soldNew: hasSold ? row.soldNew || null : null,
+      soldUsed: hasSold ? row.soldUsed || null : null,
+      stockNew: null,
+      stockUsed: null,
       setNo: payload.setNo || null,
       window: "calendar_month",
-      errorTag: row.empty ? BL_MONTH_ABSENT_TAG : null,
+      errorTag: hasSold ? null : BL_MONTH_ABSENT_TAG,
     });
   });
 
@@ -209,23 +191,18 @@ async function writeRawObservationFromParse(db, adminFirestore, payload, opts = 
     itemType,
     method,
     setNo: payload.setNo || null,
-    stockNew: parsed.stockNew || null,
-    stockUsed: parsed.stockUsed || null,
   });
 
   const bifPeriodId = lastClosedUtcYearMonth();
   const snapshotPoint =
     points.find((p) => p.periodId === currentPeriodId) || points[points.length - 1];
-  // Parent snapshot is what GET /catalog uses for the on-read card price.
-  // Monthly rows only carry stock when the *current* month has no sold — so a
-  // Used-only closed month would leave New blank on the card. Always mirror the
-  // Price Guide summary sold+stock onto the parent doc (6-month / live listings).
+  // Parent: сводка страницы (sold). Витрину в сырой monthly-точке не используем.
   const observation = {
     ...observationDocFromPoint(snapshotPoint, FieldValue),
     soldNew: parsed.soldNew || null,
     soldUsed: parsed.soldUsed || null,
-    stockNew: parsed.stockNew || null,
-    stockUsed: parsed.stockUsed || null,
+    stockNew: null,
+    stockUsed: null,
     error: null,
   };
 
