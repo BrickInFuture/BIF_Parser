@@ -22,9 +22,9 @@ on:
         required: false
         default: "burst"
       limit:
-        description: "Max items per short burst (SET+MINIFIG); stay under IP heat (~70)"
+        description: "Max items per short burst (SET+MINIFIG); stay under IP heat (~60)"
         required: false
-        default: "70"
+        default: "60"
       maxMinutes:
         description: "Catalog burst max minutes"
         required: false
@@ -74,7 +74,8 @@ jobs:
       BL_CIRCUIT_COOL_MIN_MS: "60000"
       BL_CIRCUIT_COOL_MAX_MS: "120000"
       BL_ADAPTIVE_PAUSE: "0"
-      BL_GAP_QUEUE_RATIO: "0.7"
+      BL_CURRENT_MONTH_BUDGET: "50"
+      BL_HISTORICAL_GAP_BUDGET: "10"
       BL_HTTP_FETCH: "1"
       BL_HTTP_429_RETRIES: "1"
       BL_HTTP_429_MIN_MS: "15000"
@@ -120,7 +121,7 @@ jobs:
 
       - name: Catalog ingest chunk
         env:
-          LIMIT: ${{ github.event.inputs.limit || '70' }}
+          LIMIT: ${{ github.event.inputs.limit || '60' }}
           MAX_MINUTES: ${{ github.event.inputs.maxMinutes || '15' }}
         run: npm run ingest:catalog -- --confirm --phase=primary --limit="$LIMIT" --maxMinutes="$MAX_MINUTES"
 

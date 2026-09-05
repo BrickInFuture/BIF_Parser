@@ -205,12 +205,12 @@ function aggFromStructuredBlock(block) {
   return agg;
 }
 
-/** market cell that is just "Unavailable" (no Times Sold / Total Lots table). */
+/** market cell that is just "Unavailable" / "(Unavailable)" (no Times Sold / Total Lots table). */
 function cellLooksUnavailable(text) {
   const t = cleanCellText(text);
   if (!t) return false;
   if (/Times\s*Sold|Total\s*Lots/i.test(t)) return false;
-  return /^unavailable$/i.test(t) || /^n\/?a$/i.test(t);
+  return /^\(?\s*unavailable\s*\)?$/i.test(t) || /^n\/?a$/i.test(t);
 }
 
 /**
@@ -664,11 +664,11 @@ function mergeMonthSide(row, agg, sideHint = null) {
     if (!rowHasSoldSignal({ soldNew: row.soldNew, soldUsed: emptyAgg() })) row.soldNew = agg;
     return row;
   }
-  // Legacy fixtures: first lone block → New, second → Used.
-  if (!rowHasSoldSignal({ soldNew: row.soldNew, soldUsed: emptyAgg() })) {
-    row.soldNew = agg;
-  } else if (!rowHasSoldSignal({ soldNew: emptyAgg(), soldUsed: row.soldUsed })) {
+  // Без колонки: не кладём одиночный блок в New (на BL часто нет New → только Used).
+  if (!rowHasSoldSignal({ soldNew: emptyAgg(), soldUsed: row.soldUsed })) {
     row.soldUsed = agg;
+  } else if (!rowHasSoldSignal({ soldNew: row.soldNew, soldUsed: emptyAgg() })) {
+    row.soldNew = agg;
   }
   return row;
 }
@@ -757,9 +757,10 @@ function parseMonthlySoldChunk(chunkHtml, sideHint = null) {
     return { soldNew: structured.soldNew, soldUsed: structured.soldUsed };
   }
 
+  // Одиночный блок без хинта колонки — Used (не выдумываем New).
   return {
-    soldNew: aggs[0] || emptyAgg(),
-    soldUsed: emptyAgg(),
+    soldNew: emptyAgg(),
+    soldUsed: aggs[0] || emptyAgg(),
   };
 }
 

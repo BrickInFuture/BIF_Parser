@@ -1,5 +1,5 @@
 /**
- * Scrape order: novelty (new launches) and popular LEGO themes first.
+ * Scrape order: novelty (new launches) first, then newer release year, then popular themes.
  * Used by ingestCatalog.js at window start + within each catalog page.
  */
 "use strict";
@@ -73,8 +73,21 @@ function isPopularTheme(cat) {
   return false;
 }
 
+/** Год выпуска набора (для порядка «сначала новые годы»). */
+function catalogReleaseYear(cat) {
+  const yr = Number(cat?.yearReleased);
+  if (Number.isFinite(yr) && yr >= 1950 && yr <= 2100) return yr;
+  const ms = cat?.launchDateMs != null ? Number(cat.launchDateMs) : NaN;
+  if (Number.isFinite(ms) && ms > 0) {
+    const y = new Date(ms).getUTCFullYear();
+    if (Number.isFinite(y) && y >= 1950) return y;
+  }
+  return 0;
+}
+
 /**
  * Higher score = scrape sooner.
+ * Порядок: новинки → год выпуска убывающий → популярные темы.
  * @param {object} cat
  * @param {{ skip?: boolean, reason?: string, cohort?: string, launchMs?: number|null }} [coverage]
  */
@@ -85,29 +98,25 @@ function scoreCatalogPriority(cat, coverage = {}) {
   const classif = classifyCoverage(cat, now);
   let score = 0;
 
+  // База по году: 2026 >> 2018 (все должны пройти, но сначала свежие годы).
+  score += catalogReleaseYear(cat) * 100;
+
   if (classif.cohort === "novelty") {
-    score += 1000;
+    score += 100000;
     if (classif.launchMs != null) {
       const ageMs = now - classif.launchMs;
       const freshness = Math.max(0, NOVELTY_MAX_AGE_MS - ageMs);
       score += Math.floor(freshness / DAY_MS);
     }
     if (coverage.reason === "novelty_need_month") score += 200;
-  } else if (
-    classif.cohort === "mature" &&
-    (coverage.reason === "need_current_month" || coverage.reason === "mature_stale")
-  ) {
+  } else if (classif.cohort === "mature" && coverage.reason === "mature_stale") {
     score += 120;
   }
 
   if (isPopularTheme(cat)) {
-    score += 500;
-    if (classif.cohort === "novelty") score += 300;
+    score += 50;
+    if (classif.cohort === "novelty") score += 100;
   }
-
-  const yr = Number(cat.yearReleased);
-  const thisYear = new Date().getFullYear();
-  if (Number.isFinite(yr) && yr >= thisYear - 1) score += 80;
 
   return score;
 }
@@ -119,6 +128,9 @@ function sortCatalogByPriority(items, coverageById = null) {
     const sa = scoreCatalogPriority(a, covA);
     const sb = scoreCatalogPriority(b, covB);
     if (sb !== sa) return sb - sa;
+    const yb = catalogReleaseYear(b);
+    const ya = catalogReleaseYear(a);
+    if (yb !== ya) return yb - ya;
     return String(a.catalogItemId).localeCompare(String(b.catalogItemId));
   });
 }
@@ -214,6 +226,7 @@ module.exports = {
   POPULAR_THEMES,
   normalizeThemeKey,
   isPopularTheme,
+  catalogReleaseYear,
   scoreCatalogPriority,
   sortCatalogByPriority,
   sortCatalogByPriorityLight,

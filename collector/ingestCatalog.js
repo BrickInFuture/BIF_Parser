@@ -16,8 +16,8 @@
  * Checkpoint: price_ingest_runs/market_{YYYY-MM} (or …_s{N} for shards)
  * Skips by coverage policy: novelty needs current month (after launch+2d);
  * mature only if last market ok older than ~6 months. Empty novelty → RRP×0.9 bootstrap.
- * Priority: gap queue (ledger holes) first, then catalog cursor.
- *   BL_GAP_QUEUE_RATIO=0.7  — share of --limit prefetched from gap queue (default 0.7)
+ * Priority: 50 без текущего UTC-месяца + 10 старых дыр (на limit=60), потом cursor.
+ *   BL_CURRENT_MONTH_BUDGET / BL_HISTORICAL_GAP_BUDGET — явные квоты (иначе 50+10 от 60)
  *   --queue=gap|cursor|both — gap only, cursor only, or gap then cursor (default both)
  * Skips recent soft_blocked observations (<24h) and jumps off a same-base variant cluster
  * after 2 consecutive soft-blocks so SET_8831-* cannot stall the monthly cursor.
@@ -54,7 +54,13 @@ const { resolveCatalogCoverage } = require("./coveragePolicy");
 const {
   sortCatalogByPriorityLight,
 } = require("./catalogPriority");
-const { fetchGapQueue, findGapSlotsForItem, scrapeDespiteCoverageSkip, hasBlFillableGap } = require("./gapQueue");
+const {
+  fetchGapQueue,
+  findGapSlotsForItem,
+  scrapeDespiteCoverageSkip,
+  hasBlFillableGap,
+  resolveBurstBudgets,
+} = require("./gapQueue");
 const { writeIngestArtifact } = require("./ingestReportArtifacts");
 
 function flagValue(name, fallback = null) {
@@ -647,47 +653,73 @@ async function main() {
   }
 
   try {
-    const gapRatio =
+    const burstBudgets =
       QUEUE_MODE === "cursor"
-        ? 0
-        : Number(process.env.BL_GAP_QUEUE_RATIO) ||
-          (QUEUE_MODE === "gap" ? 1 : Number(process.env.BL_PRIORITY_RATIO) || 0.7);
-    const gapBudget =
-      QUEUE_MODE === "cursor"
-        ? 0
-        : Math.min(
-            LIMIT,
-            Math.max(0, Math.floor(LIMIT * (Number.isFinite(gapRatio) ? gapRatio : 0.7)))
-          );
+        ? { current: 0, historical: 0 }
+        : QUEUE_MODE === "gap"
+          ? { current: LIMIT, historical: 0 }
+          : resolveBurstBudgets(LIMIT);
+    const gapBudget = burstBudgets.current + burstBudgets.historical;
     pendingItems = [];
     const gapHandled = new Set();
 
-    async function buildGapPendingItems(maxTasks, maxScan) {
-      if (!CONFIRM || gapBudget <= 0 || QUEUE_MODE === "cursor") return [];
-      const gapTasks = await fetchGapQueue(db, admin, {
-        types: activeTypes,
-        maxTasks,
-        maxScan,
-        currentPeriodId: periodId,
-        mapCatalogDoc,
-        shardIndex: SHARD_INDEX,
-        shardCount: SHARD_COUNT,
-        excludeIds: gapHandled,
-      });
+    function mapGapTasks(gapTasks, sourceTag) {
       return gapTasks.map((task) => ({
         cat: task.cat,
         source: "gap",
+        gapKind: sourceTag,
         targetPeriodId: task.targetPeriodId,
         gapCount: task.gapCount,
         gapPeriods: task.gapPeriods,
       }));
     }
 
+    async function buildGapPendingItems(currentN, historicalN, maxScanPer) {
+      if (!CONFIRM || QUEUE_MODE === "cursor") return [];
+      const curN = Math.max(0, Number(currentN) || 0);
+      const histN = Math.max(0, Number(historicalN) || 0);
+      if (curN <= 0 && histN <= 0) return [];
+      const scan = Math.max(maxScanPer || 500, (curN + histN) * 25);
+      const exclude = new Set(gapHandled);
+      const out = [];
+      if (curN > 0) {
+        const currentTasks = await fetchGapQueue(db, admin, {
+          types: activeTypes,
+          maxTasks: curN,
+          maxScan: scan,
+          currentPeriodId: periodId,
+          mapCatalogDoc,
+          shardIndex: SHARD_INDEX,
+          shardCount: SHARD_COUNT,
+          excludeIds: exclude,
+          onlyCurrentMonthGap: true,
+        });
+        for (const t of currentTasks) exclude.add(t.cat.catalogItemId);
+        out.push(...mapGapTasks(currentTasks, "current_month"));
+      }
+      if (histN > 0) {
+        const histTasks = await fetchGapQueue(db, admin, {
+          types: activeTypes,
+          maxTasks: histN,
+          maxScan: scan,
+          currentPeriodId: periodId,
+          mapCatalogDoc,
+          shardIndex: SHARD_INDEX,
+          shardCount: SHARD_COUNT,
+          excludeIds: exclude,
+          onlyHistoricalGaps: true,
+        });
+        out.push(...mapGapTasks(histTasks, "historical"));
+      }
+      return out;
+    }
+
     const setupStartedMs = Date.now();
     const [, initialGapItems] = await Promise.all([
       session.warmUp(),
       buildGapPendingItems(
-        gapBudget,
+        burstBudgets.current,
+        burstBudgets.historical,
         Math.max(gapBudget * 25, 500)
       ),
     ]);
@@ -714,11 +746,17 @@ async function main() {
       })
     );
     if (pendingItems.length) {
+      const nCurrent = pendingItems.filter((x) => x.gapKind === "current_month").length;
+      const nHist = pendingItems.filter((x) => x.gapKind === "historical").length;
       console.log(
         JSON.stringify({
           step: "gap_queue_built",
           size: pendingItems.length,
           budget: gapBudget,
+          currentMonthBudget: burstBudgets.current,
+          historicalGapBudget: burstBudgets.historical,
+          currentMonthQueued: nCurrent,
+          historicalQueued: nHist,
           queueMode: QUEUE_MODE,
           periodId,
         })
@@ -790,10 +828,11 @@ async function main() {
       }
       const remaining = LIMIT - chunkDone;
       if (remaining <= 0 || Date.now() >= deadlineMs) return false;
-      const batchSize = Math.min(remaining, Math.max(40, Math.floor(gapBudget / 2)));
+      const refillBudgets = resolveBurstBudgets(Math.min(remaining, Math.max(gapBudget, 20)));
       const refill = await buildGapPendingItems(
-        batchSize,
-        Math.max(batchSize * 12, 240)
+        refillBudgets.current,
+        refillBudgets.historical,
+        Math.max((refillBudgets.current + refillBudgets.historical) * 12, 240)
       );
       if (!refill.length) return false;
       pendingItems.push(...refill);

@@ -51,7 +51,8 @@ function sealAbsentMonthsBetween(points, currentPeriodId, baseMeta) {
   const fromPid = ids[0];
   let pid = fromPid;
   while (pid && pid <= currentPeriodId) {
-    if (!byId.has(pid)) {
+    // Текущий UTC-месяц не запечатываем тут — ниже, с витриной (stock).
+    if (!byId.has(pid) && pid !== currentPeriodId) {
       const sealed = buildMonthlyMarketPoint({
         catalogItemId: baseMeta.catalogItemId,
         itemType: baseMeta.itemType,
@@ -73,7 +74,8 @@ function sealAbsentMonthsBetween(points, currentPeriodId, baseMeta) {
   }
 
   if (!byId.has(currentPeriodId)) {
-    const attachStock = true;
+    const hasStock =
+      aggregateHasSignal(baseMeta.stockNew) || aggregateHasSignal(baseMeta.stockUsed);
     byId.set(
       currentPeriodId,
       buildMonthlyMarketPoint({
@@ -82,18 +84,13 @@ function sealAbsentMonthsBetween(points, currentPeriodId, baseMeta) {
         periodId: currentPeriodId,
         source: "bricklink",
         method: baseMeta.method,
-        scrapeStatus:
-          aggregateHasSignal(baseMeta.stockNew) || aggregateHasSignal(baseMeta.stockUsed)
-            ? "ok"
-            : "no_data",
-        empty: !(
-          aggregateHasSignal(baseMeta.stockNew) || aggregateHasSignal(baseMeta.stockUsed)
-        ),
-        stockNew: attachStock ? baseMeta.stockNew || null : null,
-        stockUsed: attachStock ? baseMeta.stockUsed || null : null,
+        scrapeStatus: hasStock ? "ok" : "no_data",
+        empty: !hasStock,
+        stockNew: hasStock ? baseMeta.stockNew || null : null,
+        stockUsed: hasStock ? baseMeta.stockUsed || null : null,
         setNo: baseMeta.setNo || null,
         window: "calendar_month",
-        errorTag: null,
+        errorTag: hasStock ? null : BL_MONTH_ABSENT_TAG,
       })
     );
   }

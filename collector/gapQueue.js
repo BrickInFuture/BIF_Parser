@@ -4,6 +4,9 @@
  *
  * Один HTML-скрейп market пишет **все** помесячные sold-блоки со страницы
  * (не только последние 6 месяцев — на старых наборах бывают годы истории).
+ *
+ * Залп (канон с 2026-09): **50** без текущего UTC-месяца + **10** старых дыр
+ * (при --limit=60). Порядок: новинки, потом по убыванию года выпуска.
  */
 "use strict";
 
@@ -22,7 +25,27 @@ const {
   utcYearMonth,
 } = require("./gapLedger");
 const { LEDGER_STATUS } = require("./marketPoint");
-const { scoreCatalogPriority } = require("./catalogPriority");
+const { scoreCatalogPriority, catalogReleaseYear } = require("./catalogPriority");
+
+/**
+ * Бюджет залпа: сколько брать «нужен текущий месяц» и сколько «старые дыры».
+ * По умолчанию 50+10 на каждые 60 мест (--limit).
+ */
+function resolveBurstBudgets(limit) {
+  const lim = Math.max(0, Math.floor(Number(limit) || 0));
+  const envCur = Number(process.env.BL_CURRENT_MONTH_BUDGET);
+  const envHist = Number(process.env.BL_HISTORICAL_GAP_BUDGET);
+  if (Number.isFinite(envCur) || Number.isFinite(envHist)) {
+    const current = Number.isFinite(envCur) ? Math.max(0, Math.floor(envCur)) : 0;
+    const historical = Number.isFinite(envHist) ? Math.max(0, Math.floor(envHist)) : 0;
+    const curCap = Math.min(lim, current);
+    const histCap = Math.min(Math.max(0, lim - curCap), historical);
+    return { current: curCap, historical: histCap };
+  }
+  const current = Math.min(lim, Math.round((lim * 50) / 60));
+  const historical = Math.min(Math.max(0, lim - current), Math.round((lim * 10) / 60));
+  return { current, historical };
+}
 
 function periodsToCheckForGaps(cat, currentPeriodId, nowMs = Date.now()) {
   const classif = classifyCoverage(cat, nowMs);
@@ -111,18 +134,12 @@ function scoreGapTask(cat, slots, currentPeriodId, coverage, nowMs = Date.now())
   const recentClosedGap = gaps.some((g) => g.periodId === lastClosed);
   const currentGap = gaps.some((g) => g.periodId === currentPeriodId);
 
-  // №1 — нет цены/точки за текущий UTC-месяц.
+  // №1 — нет точки за текущий UTC-месяц: новинки, потом год убывающий (в scoreCatalogPriority).
   if (currentUtcGap) {
     score += 5000;
     score += Math.min(gaps.length, 12) * 40;
     if (coverage && !coverage.skip && coverage.reason === "novelty_need_month") score += 500;
-    if (
-      coverage &&
-      !coverage.skip &&
-      (coverage.reason === "need_current_month" || coverage.reason === "mature_stale")
-    ) {
-      score += 300;
-    }
+    if (coverage && !coverage.skip && coverage.reason === "mature_stale") score += 300;
     return score;
   }
 
@@ -131,9 +148,13 @@ function scoreGapTask(cat, slots, currentPeriodId, coverage, nowMs = Date.now())
   if (recentClosedGap) score += 900;
   else if (currentGap) score += 500;
   score += Math.min(gaps.length, 12) * 50;
+  score += catalogReleaseYear(cat);
   return score;
 }
 
+/**
+ * @param {{ onlyCurrentMonthGap?: boolean, onlyHistoricalGaps?: boolean }} [opts]
+ */
 async function fetchGapQueue(db, admin, opts) {
   const types = (opts.types || ["SET", "MINIFIG"]).map((t) => String(t).toUpperCase());
   const maxTasks = Math.max(1, Number(opts.maxTasks) || 80);
@@ -143,6 +164,8 @@ async function fetchGapQueue(db, admin, opts) {
   const shardIndex = Number(opts.shardIndex) || 0;
   const shardCount = Math.max(1, Number(opts.shardCount) || 1);
   const excludeIds = opts.excludeIds || null;
+  const onlyCurrentMonthGap = opts.onlyCurrentMonthGap === true;
+  const onlyHistoricalGaps = opts.onlyHistoricalGaps === true;
   const nowMs = Date.now();
 
   const candidates = [];
@@ -183,14 +206,14 @@ async function fetchGapQueue(db, admin, opts) {
         if (!gaps.length || !hasBlFillableGap(slots, nowMs)) continue;
 
         const currentClosed = currentUtcMonthClosed(slots, nowMs);
+        if (onlyCurrentMonthGap && currentClosed) continue;
+        if (onlyHistoricalGaps && !currentClosed) continue;
 
         let coverage;
         const realCoverage = await resolveCatalogCoverage(db, cat, currentPeriodId, {
           nowMs,
         });
         if (realCoverage.skip) {
-          // Текущий закрыт, но есть несмотренные старые дыры — низкий приоритет.
-          // Или coverage skip при пустом текущем (редко).
           coverage = {
             ...realCoverage,
             skip: false,
@@ -221,9 +244,13 @@ async function fetchGapQueue(db, admin, opts) {
     }
   }
 
-  candidates.sort(
-    (a, b) => b.score - a.score || a.cat.catalogItemId.localeCompare(b.cat.catalogItemId)
-  );
+  candidates.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    const yb = catalogReleaseYear(b.cat);
+    const ya = catalogReleaseYear(a.cat);
+    if (yb !== ya) return yb - ya;
+    return a.cat.catalogItemId.localeCompare(b.cat.catalogItemId);
+  });
   return candidates.slice(0, maxTasks);
 }
 
@@ -235,4 +262,5 @@ module.exports = {
   scrapeDespiteCoverageSkip,
   scoreGapTask,
   fetchGapQueue,
+  resolveBurstBudgets,
 };
