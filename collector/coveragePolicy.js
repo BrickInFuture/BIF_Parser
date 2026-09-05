@@ -14,6 +14,7 @@ const {
   pickCatalogRrpUsd,
   positiveUsdOrNull,
 } = require("./catalogFields");
+const { observationHasPricedSignal } = require("./marketPoint");
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const LAUNCH_MIN_AGE_MS = 2 * DAY_MS;
@@ -176,7 +177,7 @@ async function resolveCatalogCoverage(db, cat, periodId, opts = {}) {
     obs = null;
   }
 
-  if (obs && String(obs.status || "") === "ok" && obs.empty !== true && !isRrpBootstrapDoc(obs)) {
+  if (obs && observationHasPricedSignal(obs) && !isRrpBootstrapDoc(obs)) {
     const ms = tsToMs(obs.capturedAt) || tsToMs(obs.updatedAt);
     const ttlMs = matureTtlMsForAge(classif.ageMs);
     if (ms != null && nowMs - ms < ttlMs) {

@@ -26,6 +26,31 @@ const {
 } = require("./gapLedger");
 const { LEDGER_STATUS } = require("./marketPoint");
 const { scoreCatalogPriority, catalogReleaseYear } = require("./catalogPriority");
+const { errorLooksLikeSoftBlock } = require("./parseHtml");
+
+/** Не ставить в очередь то, что уже резали <24ч — иначе 60 слотов сгорают на SKIP. */
+const SOFT_BLOCK_SKIP_MS = 24 * 60 * 60 * 1000;
+
+function tsToMs(v) {
+  if (!v) return null;
+  if (typeof v.toMillis === "function") return v.toMillis();
+  if (typeof v._seconds === "number") return v._seconds * 1000;
+  if (typeof v.seconds === "number") return v.seconds * 1000;
+  if (v instanceof Date) return v.getTime();
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+async function recentlySoftBlocked(db, catalogItemId, maxAgeMs = SOFT_BLOCK_SKIP_MS) {
+  const obsId = observationDocId(catalogItemId, "bricklink");
+  const snap = await db.collection("market_observations").doc(obsId).get();
+  if (!snap.exists) return false;
+  const d = snap.data() || {};
+  if (!errorLooksLikeSoftBlock(d.errorTag, d.error)) return false;
+  const ms = tsToMs(d.updatedAt) || tsToMs(d.capturedAt);
+  if (ms == null) return false;
+  return Date.now() - ms < maxAgeMs;
+}
 
 /**
  * Бюджет залпа: сколько брать «нужен текущий месяц» и сколько «старые дыры».
@@ -83,6 +108,21 @@ async function loadMonthlyByPeriod(db, obsId, periodIds) {
     if (snap.exists) map.set(snap.id, snap.data() || {});
   }
   return map;
+}
+
+/** Быстро: текущий UTC-месяц ещё не закрыт в ledger (дыра). */
+async function currentMonthNeedsScrape(db, cat, currentPeriodId, nowMs = Date.now()) {
+  const pid = currentPeriodId || utcYearMonth(new Date(nowMs));
+  const obsId = observationDocId(cat.catalogItemId, "bricklink");
+  const snap = await db
+    .collection("market_observations")
+    .doc(obsId)
+    .collection("monthly")
+    .doc(pid)
+    .get();
+  if (!snap.exists) return true;
+  const slot = classifyPeriodSlot(pid, snap.data() || {});
+  return slot.status === LEDGER_STATUS.GAP || slot.status === LEDGER_STATUS.ERROR;
 }
 
 async function findGapSlotsForItem(db, cat, currentPeriodId, nowMs = Date.now()) {
@@ -158,7 +198,15 @@ function scoreGapTask(cat, slots, currentPeriodId, coverage, nowMs = Date.now())
 async function fetchGapQueue(db, admin, opts) {
   const types = (opts.types || ["SET", "MINIFIG"]).map((t) => String(t).toUpperCase());
   const maxTasks = Math.max(1, Number(opts.maxTasks) || 80);
-  const maxScan = Math.max(maxTasks, Number(opts.maxScan) || maxTasks * 25);
+  // Текущий месяц: лёгкая проверка → можно сканировать далеко.
+  // Старые дыры: полный ledger дороже → умеренный лимит.
+  const envScan = Number(opts.maxScan);
+  const defaultScan = opts.onlyCurrentMonthGap
+    ? Math.max(maxTasks * 500, 25000)
+    : Math.max(maxTasks * 80, 4000);
+  const maxScan = Number.isFinite(envScan)
+    ? Math.max(maxTasks, Math.floor(envScan))
+    : defaultScan;
   const currentPeriodId = opts.currentPeriodId;
   const mapCatalogDoc = opts.mapCatalogDoc;
   const shardIndex = Number(opts.shardIndex) || 0;
@@ -181,7 +229,8 @@ async function fetchGapQueue(db, admin, opts) {
 
   for (const itemType of types) {
     let lastId = null;
-    while (candidates.length < maxTasks * 3 && scanned < maxScan) {
+    const wantPool = Math.max(maxTasks * 3, maxTasks);
+    while (candidates.length < wantPool && scanned < maxScan) {
       let q = db
         .collection("catalog_items")
         .where("itemType", "==", itemType)
@@ -199,15 +248,28 @@ async function fetchGapQueue(db, admin, opts) {
 
         const cat = mapCatalogDoc(doc);
         if (!cat.itemNumber || !cat.supportedBlType || cat.mistypedGear) continue;
+        if (opts.skipRecentSoftBlock !== false) {
+          if (await recentlySoftBlocked(db, doc.id)) continue;
+        }
 
-        const slots = await findGapSlotsForItem(db, cat, currentPeriodId, nowMs);
-        const gaps = slots.filter((s) => s.status === LEDGER_STATUS.GAP);
-        // no_data / ok / bootstrap — не дыры. Пустая очередь дыр → мимо.
-        if (!gaps.length || !hasBlFillableGap(slots, nowMs)) continue;
+        let slots;
+        let gaps;
+        let currentClosed;
 
-        const currentClosed = currentUtcMonthClosed(slots, nowMs);
-        if (onlyCurrentMonthGap && currentClosed) continue;
-        if (onlyHistoricalGaps && !currentClosed) continue;
+        if (onlyCurrentMonthGap) {
+          const needs = await currentMonthNeedsScrape(db, cat, currentPeriodId, nowMs);
+          if (!needs) continue;
+          currentClosed = false;
+          gaps = [{ periodId: currentPeriodId || utcYearMonth(new Date(nowMs)), status: LEDGER_STATUS.GAP }];
+          slots = gaps;
+        } else {
+          slots = await findGapSlotsForItem(db, cat, currentPeriodId, nowMs);
+          gaps = slots.filter((s) => s.status === LEDGER_STATUS.GAP);
+          if (!gaps.length || !hasBlFillableGap(slots, nowMs)) continue;
+          currentClosed = currentUtcMonthClosed(slots, nowMs);
+          if (onlyHistoricalGaps && !currentClosed) continue;
+          if (!onlyHistoricalGaps && currentClosed && !hasBlFillableGap(slots, nowMs)) continue;
+        }
 
         let coverage;
         const realCoverage = await resolveCatalogCoverage(db, cat, currentPeriodId, {
@@ -257,10 +319,13 @@ async function fetchGapQueue(db, admin, opts) {
 module.exports = {
   periodsToCheckForGaps,
   findGapSlotsForItem,
+  currentMonthNeedsScrape,
   currentUtcMonthClosed,
   hasBlFillableGap,
   scrapeDespiteCoverageSkip,
   scoreGapTask,
   fetchGapQueue,
   resolveBurstBudgets,
+  recentlySoftBlocked,
+  SOFT_BLOCK_SKIP_MS,
 };

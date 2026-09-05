@@ -24,16 +24,11 @@ function buildMonthEndText(kpi = {}, env = process.env) {
   const when = formatReportDateRu(new Date());
   const monthNom = periodIdRu(kpi.periodId, "nominative");
   const periodGen = periodIdRu(kpi.periodId, "genitive");
-  const monthOk = Number(kpi.monthOkPrimary);
   const anyOk = Number(kpi.anyOkPrimary);
   const freshOk = Number(kpi.freshOkPrimary);
+  const monthOk = Number(kpi.monthOkPrimary);
   const catalog = Number(kpi.catalogPrimary);
-  const monthPct =
-    kpi.monthPricedPctPrimary != null && Number.isFinite(Number(kpi.monthPricedPctPrimary))
-      ? Number(kpi.monthPricedPctPrimary)
-      : catalog > 0 && Number.isFinite(monthOk)
-        ? Math.round((monthOk / catalog) * 1000) / 10
-        : null;
+  const days = Number(kpi.days) > 0 ? Number(kpi.days) : 28;
   const anyPct =
     kpi.anyPricedPctPrimary != null && Number.isFinite(Number(kpi.anyPricedPctPrimary))
       ? Number(kpi.anyPricedPctPrimary)
@@ -46,7 +41,13 @@ function buildMonthEndText(kpi = {}, env = process.env) {
       : catalog > 0 && Number.isFinite(freshOk)
         ? Math.round((freshOk / catalog) * 1000) / 10
         : null;
-  const mark = coverageCircles(monthPct);
+  const monthPct =
+    kpi.monthPricedPctPrimary != null && Number.isFinite(Number(kpi.monthPricedPctPrimary))
+      ? Number(kpi.monthPricedPctPrimary)
+      : catalog > 0 && Number.isFinite(monthOk)
+        ? Math.round((monthOk / catalog) * 1000) / 10
+        : null;
+  const mark = coverageCircles(freshPct != null ? freshPct : anyPct);
   const trips = Number(kpi.runOkWithPrices != null ? kpi.runOkWithPrices : kpi.runOk);
   const perDay = Number(kpi.okPerDayWithPrices);
   const dayTarget = Number(kpi.okPerDayTarget != null ? kpi.okPerDayTarget : 2000);
@@ -62,24 +63,21 @@ function buildMonthEndText(kpi = {}, env = process.env) {
     when,
     "(автосбор дней 1–26 закончен)",
     "",
-    `Каталог (наборы + минифиги) ${mark}`,
-    "",
-    "Наборов со свежими ценами",
-    `• с любой ценой в базе: ${n(anyOk)} из ${n(catalog)}${
-      anyPct != null ? ` (${anyPct}%)` : ""
-    }`,
-    `• с ценой текущего месяца (${monthNom}): ${n(monthOk)} из ${n(catalog)}${
-      monthPct != null ? ` (${monthPct}%)` : ""
-    } — цель ≥${target}%`,
-    `• со свежей ценой: ${n(freshOk)} из ${n(catalog)}${
+    `Покрытие (наборы + минифиги) ${mark}`,
+    `• свежие цены (за ${days} дн.): ${n(freshOk)} из ${n(catalog)}${
       freshPct != null ? ` (${freshPct}%)` : ""
     }`,
-    `• цель ≥${target}% за ${monthNom}: ${hitTarget ? "достигнута" : "не достигнута"}`,
+    `• в целом с ценой в базе: ${n(anyOk)} из ${n(catalog)}${
+      anyPct != null ? ` (${anyPct}%)` : ""
+    }`,
+    "",
+    `За ${monthNom}: с ценой месяца ${n(monthOk)} из ${n(catalog)}${
+      monthPct != null ? ` (${monthPct}%)` : ""
+    } — цель ≥${target}% ${hitTarget ? "достигнута" : "не достигнута"}`,
   ];
 
   if (Number.isFinite(trips) && trips > 0) {
-    lines.push(`• успешных съёмов за ${monthNom}: ${trips}`);
-    lines.push("  (число удачных походов за ценой за месяц)");
+    lines.push(`• успешных съёмов с ценой: ${trips}`);
   }
   if (Number.isFinite(perDay) && perDay > 0) {
     lines.push(`• в среднем в день: ${perDay} (цель >${dayTarget})`);
@@ -89,7 +87,7 @@ function buildMonthEndText(kpi = {}, env = process.env) {
       `• удачность запросов: ${successPct}% (ок ${runOk}, мимо ${runFail}; цель >${SUCCESS_PCT_TARGET}%)`
     );
   }
-  if (backlog != null && backlog !== "") {
+  if (backlog != null && backlog !== "" && Number(backlog) > 0) {
     lines.push(`• осталось в очереди ошибок: ${n(backlog)}`);
   }
 

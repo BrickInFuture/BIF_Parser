@@ -20,6 +20,8 @@ const {
   writeMarketPoint,
   aggregateHasSignal,
   observationDocFromPoint,
+  observationHasPricedSignal,
+  monthlyDocToFirestore,
 } = require("./marketPoint");
 const {
   utcYearMonth,
@@ -34,6 +36,38 @@ const BL_MONTH_ABSENT_TAG = "bl_month_absent";
 function rowHasSoldSignal(row) {
   if (!row) return false;
   return aggregateHasSignal(row.soldNew) || aggregateHasSignal(row.soldUsed);
+}
+
+/**
+ * Корневой снимок для отчёта / TTL: не брать пустой текущий месяц,
+ * если на странице или в помесячной истории есть сделки.
+ */
+function pickParentSnapshotPoint(points, pageSoldNew, pageSoldUsed) {
+  const list = Array.isArray(points) ? points.filter(Boolean) : [];
+  const pricedMonthly = list
+    .filter((p) => p.status === "ok" && rowHasSoldSignal(p))
+    .sort((a, b) => String(b.periodId).localeCompare(String(a.periodId)));
+  if (pricedMonthly.length) return pricedMonthly[0];
+
+  const pageHasSold =
+    aggregateHasSignal(pageSoldNew) || aggregateHasSignal(pageSoldUsed);
+  if (pageHasSold && list.length) {
+    const base = list[list.length - 1];
+    return {
+      ...base,
+      status: "ok",
+      empty: false,
+      soldNew: pageSoldNew || null,
+      soldUsed: pageSoldUsed || null,
+      stockNew: null,
+      stockUsed: null,
+      errorTag: null,
+      window: base.window || "calendar_month",
+    };
+  }
+
+  const currentPeriodId = utcYearMonth();
+  return list.find((p) => p.periodId === currentPeriodId) || list[list.length - 1] || null;
 }
 
 /**
@@ -128,6 +162,42 @@ async function writeRawSingle(db, adminFirestore, payload, opts, periodId) {
     };
   }
 
+  // Месяц без сделок: не затираем корневой ok, если цена в базе уже была.
+  if (point.status === "no_data" && parsed.ok) {
+    const existingSnap = await db.collection("market_observations").doc(obsId).get();
+    const existing = existingSnap.exists ? existingSnap.data() || {} : null;
+    if (existing && observationHasPricedSignal(existing)) {
+      const monthly = monthlyDocToFirestore(point, FieldValue);
+      await db
+        .collection("market_observations")
+        .doc(obsId)
+        .collection("monthly")
+        .doc(periodId)
+        .set(monthly, { merge: true });
+      await db
+        .collection("market_observations")
+        .doc(obsId)
+        .set(
+          {
+            updatedAt: FieldValue.serverTimestamp(),
+            lastCheckedPeriodId: periodId,
+            lastCheckedStatus: "no_data",
+            lastCheckedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+      return {
+        dryRun: false,
+        obsId,
+        periodId,
+        bifPeriodId: lastClosedUtcYearMonth(),
+        writtenPeriodIds: [periodId],
+        wroteObservation: true,
+        preservedPricedParent: true,
+      };
+    }
+  }
+
   await writeMarketPoint(db, obsId, point, FieldValue, { dryRun: false });
   if (!parsed.ok && parsed.error) {
     await db.collection("market_observations").doc(obsId).set({ error: parsed.error }, { merge: true });
@@ -194,17 +264,31 @@ async function writeRawObservationFromParse(db, adminFirestore, payload, opts = 
   });
 
   const bifPeriodId = lastClosedUtcYearMonth();
-  const snapshotPoint =
-    points.find((p) => p.periodId === currentPeriodId) || points[points.length - 1];
-  // Parent: сводка страницы (sold). Витрину в сырой monthly-точке не используем.
+  const snapshotPoint = pickParentSnapshotPoint(
+    points,
+    parsed.soldNew,
+    parsed.soldUsed
+  );
+  // Parent: сводка с ценой (sold), даже если текущий UTC-месяц пуст.
   const observation = {
     ...observationDocFromPoint(snapshotPoint, FieldValue),
-    soldNew: parsed.soldNew || null,
-    soldUsed: parsed.soldUsed || null,
+    soldNew:
+      (aggregateHasSignal(parsed.soldNew) ? parsed.soldNew : null) ||
+      snapshotPoint.soldNew ||
+      null,
+    soldUsed:
+      (aggregateHasSignal(parsed.soldUsed) ? parsed.soldUsed : null) ||
+      snapshotPoint.soldUsed ||
+      null,
     stockNew: null,
     stockUsed: null,
     error: null,
   };
+  if (observationHasPricedSignal(observation)) {
+    observation.status = "ok";
+    observation.empty = false;
+    observation.error = null;
+  }
 
   if (opts.dryRun) {
     const lastPacked = await writeMarketPoint(db, obsId, snapshotPoint, FieldValue, { dryRun: true });
@@ -300,6 +384,7 @@ async function writeRawBootstrapMarker(db, adminFirestore, payload, opts = {}) {
 module.exports = {
   BL_MONTH_ABSENT_TAG,
   rowHasSoldSignal,
+  pickParentSnapshotPoint,
   sealAbsentMonthsBetween,
   writeRawSingle,
   writeRawObservationFromParse,

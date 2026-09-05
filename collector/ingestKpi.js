@@ -13,6 +13,7 @@ const { utcYearMonth } = require("./gapLedger");
 const { runDocId, patchRun } = require("./checkpoint");
 const { PRIMARY_TYPES } = require("./ingestTypes");
 const { writeIngestArtifact } = require("./ingestReportArtifacts");
+const { observationHasPricedSignal } = require("./marketPoint");
 
 function flagValue(name, fallback = null) {
   const prefix = `--${name}=`;
@@ -139,7 +140,7 @@ async function main() {
         }
       }
 
-      if (isPrimary && st === "ok" && d.empty !== true) {
+      if (isPrimary && observationHasPricedSignal(d)) {
         anyOkPrimary += 1;
       }
 

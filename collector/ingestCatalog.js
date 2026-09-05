@@ -60,6 +60,8 @@ const {
   scrapeDespiteCoverageSkip,
   hasBlFillableGap,
   resolveBurstBudgets,
+  currentMonthNeedsScrape,
+  recentlySoftBlocked,
 } = require("./gapQueue");
 const { writeIngestArtifact } = require("./ingestReportArtifacts");
 
@@ -366,6 +368,7 @@ async function main() {
   let chunkOkWithPrices = 0;
   let chunkNoData = 0;
   let gapRefills = 0;
+  let burstQueued = 0;
   let lastError = null;
   let exhausted = false;
   let stopWindow = false;
@@ -674,19 +677,19 @@ async function main() {
       }));
     }
 
-    async function buildGapPendingItems(currentN, historicalN, maxScanPer) {
+    async function buildGapPendingItems(currentN, historicalN) {
       if (!CONFIRM || QUEUE_MODE === "cursor") return [];
       const curN = Math.max(0, Number(currentN) || 0);
       const histN = Math.max(0, Number(historicalN) || 0);
       if (curN <= 0 && histN <= 0) return [];
-      const scan = Math.max(maxScanPer || 500, (curN + histN) * 25);
       const exclude = new Set(gapHandled);
       const out = [];
+      let currentGot = 0;
       if (curN > 0) {
         const currentTasks = await fetchGapQueue(db, admin, {
           types: activeTypes,
           maxTasks: curN,
-          maxScan: scan,
+          maxScan: Math.max(curN * 500, 25000),
           currentPeriodId: periodId,
           mapCatalogDoc,
           shardIndex: SHARD_INDEX,
@@ -696,12 +699,15 @@ async function main() {
         });
         for (const t of currentTasks) exclude.add(t.cat.catalogItemId);
         out.push(...mapGapTasks(currentTasks, "current_month"));
+        currentGot = currentTasks.length;
       }
-      if (histN > 0) {
+      // Недобор слота «текущий месяц» → добираем старыми дырами до полного лимита залпа.
+      const histNeed = histN + Math.max(0, curN - currentGot);
+      if (histNeed > 0) {
         const histTasks = await fetchGapQueue(db, admin, {
           types: activeTypes,
-          maxTasks: histN,
-          maxScan: scan,
+          maxTasks: histNeed,
+          maxScan: Math.max(histNeed * 100, 8000),
           currentPeriodId: periodId,
           mapCatalogDoc,
           shardIndex: SHARD_INDEX,
@@ -714,14 +720,103 @@ async function main() {
       return out;
     }
 
+    /**
+     * Если gap-очередь короче LIMIT — добираем наборами без точки за текущий месяц
+     * обходом каталога (иначе курсор потом всё SKIP и в отчёте ~10 запросов).
+     */
+    async function padBurstQueueToLimit(items, targetLimit) {
+      const target = Math.max(0, Number(targetLimit) || 0);
+      if (!CONFIRM || QUEUE_MODE === "cursor" || target <= 0) return items;
+      const out = [...items];
+      const exclude = new Set(out.map((x) => x.cat.catalogItemId));
+      for (const id of gapHandled) exclude.add(id);
+
+      if (out.length < target) {
+        const need = target - out.length;
+        const moreCur = await fetchGapQueue(db, admin, {
+          types: activeTypes,
+          maxTasks: need,
+          maxScan: Math.max(need * 500, 25000),
+          currentPeriodId: periodId,
+          mapCatalogDoc,
+          shardIndex: SHARD_INDEX,
+          shardCount: SHARD_COUNT,
+          excludeIds: exclude,
+          onlyCurrentMonthGap: true,
+        });
+        for (const t of moreCur) {
+          exclude.add(t.cat.catalogItemId);
+          out.push(...mapGapTasks([t], "current_month"));
+          if (out.length >= target) break;
+        }
+      }
+
+      if (out.length < target) {
+        const need = target - out.length;
+        const moreHist = await fetchGapQueue(db, admin, {
+          types: activeTypes,
+          maxTasks: need,
+          maxScan: Math.max(need * 100, 8000),
+          currentPeriodId: periodId,
+          mapCatalogDoc,
+          shardIndex: SHARD_INDEX,
+          shardCount: SHARD_COUNT,
+          excludeIds: exclude,
+          onlyHistoricalGaps: true,
+        });
+        for (const t of moreHist) {
+          exclude.add(t.cat.catalogItemId);
+          out.push(...mapGapTasks([t], "historical"));
+          if (out.length >= target) break;
+        }
+      }
+
+      // Обход каталога: только те, у кого текущий месяц ещё дыра.
+      let padTypeIndex = 0;
+      let padCursorId = null;
+      let emptyTypes = 0;
+      let scanned = 0;
+      const maxPadScan = Math.max((target - out.length) * 400, 12000);
+      while (out.length < target && scanned < maxPadScan && emptyTypes < activeTypes.length) {
+        const t = activeTypes[padTypeIndex % activeTypes.length];
+        const page = await fetchCatalogPageByType(db, admin, t, padCursorId, 50);
+        scanned += page.length || 1;
+        if (!page.length) {
+          emptyTypes += 1;
+          padTypeIndex += 1;
+          padCursorId = null;
+          continue;
+        }
+        emptyTypes = 0;
+        padCursorId = page[page.length - 1].catalogItemId;
+        for (const cat of page) {
+          if (out.length >= target) break;
+          if (exclude.has(cat.catalogItemId)) continue;
+          if (SHARD_COUNT > 1 && shardBucket(cat.catalogItemId, SHARD_COUNT) !== SHARD_INDEX) {
+            continue;
+          }
+          if (!cat.itemNumber || !cat.supportedBlType || cat.mistypedGear) continue;
+          if (await recentlySoftBlocked(db, cat.catalogItemId)) continue;
+          const needs = await currentMonthNeedsScrape(db, cat, periodId);
+          if (!needs) continue;
+          exclude.add(cat.catalogItemId);
+          out.push({
+            cat,
+            source: "gap",
+            gapKind: "current_month_pad",
+            targetPeriodId: periodId,
+          });
+        }
+        padTypeIndex += 1;
+      }
+
+      return out.slice(0, target);
+    }
+
     const setupStartedMs = Date.now();
     const [, initialGapItems] = await Promise.all([
       session.warmUp(),
-      buildGapPendingItems(
-        burstBudgets.current,
-        burstBudgets.historical,
-        Math.max(gapBudget * 25, 500)
-      ),
+      buildGapPendingItems(burstBudgets.current, burstBudgets.historical),
     ]);
     try {
       if (session.httpCookieHeader) {
@@ -734,7 +829,22 @@ async function main() {
     } catch (authErr) {
       console.warn("http_auth_save_failed", authErr && authErr.message ? authErr.message : authErr);
     }
-    pendingItems = initialGapItems;
+    pendingItems =
+      QUEUE_MODE === "cursor"
+        ? initialGapItems
+        : await padBurstQueueToLimit(initialGapItems, LIMIT);
+    burstQueued = pendingItems.length;
+    if (QUEUE_MODE !== "cursor" && pendingItems.length < LIMIT) {
+      console.log(
+        JSON.stringify({
+          step: "burst_queue_short",
+          queued: pendingItems.length,
+          want: LIMIT,
+          currentBudget: burstBudgets.current,
+          historicalBudget: burstBudgets.historical,
+        })
+      );
+    }
     deadlineMs = Date.now() + MAX_MINUTES * 60 * 1000;
     scrapeStartedMs = Date.now();
     console.log(
@@ -746,13 +856,16 @@ async function main() {
       })
     );
     if (pendingItems.length) {
-      const nCurrent = pendingItems.filter((x) => x.gapKind === "current_month").length;
+      const nCurrent = pendingItems.filter((x) =>
+        String(x.gapKind || "").startsWith("current_month")
+      ).length;
       const nHist = pendingItems.filter((x) => x.gapKind === "historical").length;
       console.log(
         JSON.stringify({
           step: "gap_queue_built",
           size: pendingItems.length,
           budget: gapBudget,
+          limit: LIMIT,
           currentMonthBudget: burstBudgets.current,
           historicalGapBudget: burstBudgets.historical,
           currentMonthQueued: nCurrent,
@@ -831,8 +944,7 @@ async function main() {
       const refillBudgets = resolveBurstBudgets(Math.min(remaining, Math.max(gapBudget, 20)));
       const refill = await buildGapPendingItems(
         refillBudgets.current,
-        refillBudgets.historical,
-        Math.max((refillBudgets.current + refillBudgets.historical) * 12, 240)
+        refillBudgets.historical
       );
       if (!refill.length) return false;
       pendingItems.push(...refill);
@@ -876,9 +988,16 @@ async function main() {
           continue;
         }
 
-        pendingItems = sortCatalogByPriorityLight(page)
-          .filter((cat) => !gapHandled.has(cat.catalogItemId))
-          .map((cat) => ({ cat, source: "cursor" }));
+        pendingItems = [];
+        for (const cat of sortCatalogByPriorityLight(page)) {
+          if (gapHandled.has(cat.catalogItemId)) continue;
+          if (await recentlySoftBlocked(db, cat.catalogItemId)) continue;
+          // Курсор: берём только тех, у кого текущий месяц ещё дыра —
+          // иначе куча SKIP и chunkDone остаётся ~10.
+          const needs = await currentMonthNeedsScrape(db, cat, periodId);
+          if (!needs) continue;
+          pendingItems.push({ cat, source: "cursor" });
+        }
         rotateTypeAfterPage();
         if (!pendingItems.length) continue;
       }
@@ -941,7 +1060,7 @@ async function main() {
           }
         }
 
-        // Cursor: текущий месяц уже есть → мимо.
+        // Cursor: текущий месяц уже есть (ok или no_data) → мимо.
         // Gap: текущий есть, но остались несмотренные старые дыры → можно добрать.
         if (await alreadyOkThisPeriod(db, cat.catalogItemId, periodId, cat)) {
           if (source === "gap") {
@@ -1257,6 +1376,8 @@ async function main() {
     chunkDone,
     chunkOkWithPrices,
     chunkNoData,
+    burstQueued,
+    burstLimit: LIMIT,
     gapRefills,
     processed,
     ok,

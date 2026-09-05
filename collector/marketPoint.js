@@ -167,8 +167,31 @@ function monthlyDocToFirestore(point, FieldValue) {
   };
 }
 
+/**
+ * Есть ли у корневого снимка реальная цена (sold).
+ * Важно: status мог ошибочно стать no_data при пустом текущем месяце,
+ * пока soldNew/soldUsed со страницы ещё на месте.
+ */
+function observationHasPricedSignal(doc) {
+  if (!doc || typeof doc !== "object") return false;
+  if (aggregateHasSignal(doc.soldNew) || aggregateHasSignal(doc.soldUsed)) return true;
+  const st = String(doc.status || "");
+  if (st === "ok" && doc.empty !== true) return true;
+  return false;
+}
+
 /** Поля верхнего уровня observation (последний снимок источника). */
 function observationDocFromPoint(point, FieldValue) {
+  const hasSold =
+    aggregateHasSignal(point.soldNew) || aggregateHasSignal(point.soldUsed);
+  const status =
+    point.status === "error"
+      ? "error"
+      : hasSold
+        ? "ok"
+        : point.status === "ok"
+          ? "ok"
+          : point.status || "no_data";
   return {
     catalogItemId: point.catalogItemId,
     itemType: point.itemType,
@@ -176,14 +199,14 @@ function observationDocFromPoint(point, FieldValue) {
     currency: point.currency || "USD",
     window: point.window || "last_6_months",
     method: point.method,
-    status: point.status,
-    empty: point.status === "no_data",
+    status,
+    empty: status === "no_data",
     soldNew: point.soldNew,
     soldUsed: point.soldUsed,
     stockNew: point.stockNew,
     stockUsed: point.stockUsed,
     setNo: point.setNo || null,
-    error: point.status === "error" ? point.errorTag || "error" : null,
+    error: status === "error" ? point.errorTag || "error" : null,
     errorTag: point.errorTag || null,
     ledgerStatus: point.ledgerStatus,
     capturedAt: FieldValue.serverTimestamp(),
@@ -223,5 +246,6 @@ module.exports = {
   buildMonthlyMarketPoint,
   monthlyDocToFirestore,
   observationDocFromPoint,
+  observationHasPricedSignal,
   writeMarketPoint,
 };

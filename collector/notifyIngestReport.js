@@ -243,21 +243,15 @@ function buildAnalysis({ conclusion, catalog, retry, chunkPct, chunkDone, chunkO
 }
 
 /**
- * Блок каталога: любая цена / цена текущего месяца / свежая (~28 дней).
+ * Покрытие каталога — ровно две метрики владельца:
+ *   1) свежие цены (~28 дней) из всех SET+MINIFIG
+ *   2) в целом наборы с любой ценой в базе
  */
 function buildCoverageLines(kpi, chunkOk, opts = {}) {
   const lines = [];
-  const monthNom = periodIdRu(kpi.periodId, "nominative");
-  const monthOk = Number(kpi.monthOkPrimary);
   const anyOk = Number(kpi.anyOkPrimary);
   const freshOk = Number(kpi.freshOkPrimary);
   const catalog = Number(kpi.catalogPrimary);
-  const monthPct =
-    kpi.monthPricedPctPrimary != null && Number.isFinite(Number(kpi.monthPricedPctPrimary))
-      ? Number(kpi.monthPricedPctPrimary)
-      : catalog > 0 && Number.isFinite(monthOk)
-        ? Math.round((monthOk / catalog) * 1000) / 10
-        : null;
   const anyPct =
     kpi.anyPricedPctPrimary != null && Number.isFinite(Number(kpi.anyPricedPctPrimary))
       ? Number(kpi.anyPricedPctPrimary)
@@ -270,78 +264,42 @@ function buildCoverageLines(kpi, chunkOk, opts = {}) {
       : catalog > 0 && Number.isFinite(freshOk)
         ? Math.round((freshOk / catalog) * 1000) / 10
         : null;
-  const coverMark = coverageCircles(monthPct);
-  const trips = Number(kpi.runOkWithPrices != null ? kpi.runOkWithPrices : kpi.runOk);
-  const perDay = Number(kpi.okPerDayWithPrices);
-  const dayTarget = Number(kpi.okPerDayTarget != null ? kpi.okPerDayTarget : 2000);
-  const successPct = kpi.runSuccessPct;
-  const runOk = Number(kpi.runOk) || 0;
-  const runFail = Number(kpi.runFail) || 0;
+  const coverMark = coverageCircles(freshPct != null ? freshPct : anyPct);
   const backlog = kpi.errorBacklogPrimary;
   const burstDidNotRun = opts.burstDidNotRun === true;
+  const days = Number(kpi.days) > 0 ? Number(kpi.days) : 28;
 
-  lines.push(`Каталог (наборы + минифиги) ${coverMark}`);
+  lines.push(`Покрытие (наборы + минифиги) ${coverMark}`);
   if (burstDidNotRun) {
     lines.push("• залп не писал цены — ниже без изменений с прошлого успешного съёма");
   }
 
-  lines.push("", "Наборов со свежими ценами");
-  if (Number.isFinite(anyOk) && Number.isFinite(catalog) && catalog > 0) {
-    lines.push(
-      `• с любой ценой в базе: ${anyOk} из ${catalog}${anyPct != null ? ` (${anyPct}%)` : ""}`
-    );
-  } else {
-    lines.push(`• с любой ценой в базе: ${n(kpi.anyOkPrimary)} из ${n(kpi.catalogPrimary)}`);
-  }
-
-  if (Number.isFinite(monthOk) && Number.isFinite(catalog) && catalog > 0) {
-    lines.push(
-      `• с ценой текущего месяца (${monthNom}): ${monthOk} из ${catalog}${
-        monthPct != null ? ` (${monthPct}%)` : ""
-      } — цель ≥${COVERAGE_PCT_TARGET}%`
-    );
-  } else {
-    lines.push(
-      `• с ценой текущего месяца: ${n(kpi.monthOkPrimary)} из ${n(
-        kpi.catalogPrimary
-      )} — цель ≥${COVERAGE_PCT_TARGET}%`
-    );
-  }
-
   if (Number.isFinite(freshOk) && Number.isFinite(catalog) && catalog > 0) {
     lines.push(
-      `• со свежей ценой: ${freshOk} из ${catalog}${freshPct != null ? ` (${freshPct}%)` : ""}`
+      `• свежие цены (за ${days} дн.): ${freshOk} из ${catalog}${
+        freshPct != null ? ` (${freshPct}%)` : ""
+      }`
     );
-  } else if (kpi.freshOkPrimary != null) {
-    lines.push(`• со свежей ценой: ${n(kpi.freshOkPrimary)} из ${n(kpi.catalogPrimary)}`);
-  }
-
-  if (Number.isFinite(trips) && trips > 0) {
-    lines.push(`• успешных съёмов за ${monthNom}: ${trips}`);
-    lines.push("  (число удачных походов за ценой за месяц)");
-  }
-
-  if (Number.isFinite(perDay) && perDay > 0) {
-    const pace =
-      perDay >= dayTarget
-        ? "темп ок"
-        : perDay >= dayTarget * 0.75
-          ? "темп ниже цели"
-          : "темпа не хватает";
-    lines.push(`• в среднем в день: ${perDay} (цель >${dayTarget}) — ${pace}`);
-  }
-
-  if (successPct != null && successPct !== "") {
+  } else {
     lines.push(
-      `• удачность запросов за ${monthNom}: ${successPct}% (ок ${runOk}, мимо ${runFail}; цель >${SUCCESS_PCT_TARGET}%)`
+      `• свежие цены: ${n(kpi.freshOkPrimary)} из ${n(kpi.catalogPrimary)}`
     );
   }
-  if (backlog != null && backlog !== "") {
-    lines.push(`• ждут повтора после ошибки: ${n(backlog)}`);
+
+  if (Number.isFinite(anyOk) && Number.isFinite(catalog) && catalog > 0) {
+    lines.push(
+      `• в целом с ценой в базе: ${anyOk} из ${catalog}${
+        anyPct != null ? ` (${anyPct}%)` : ""
+      }`
+    );
+  } else {
+    lines.push(
+      `• в целом с ценой в базе: ${n(kpi.anyOkPrimary)} из ${n(kpi.catalogPrimary)}`
+    );
   }
 
-  if (monthPct != null && monthPct < 50 && !burstDidNotRun) {
-    lines.push(`• 🚨 меньше половины каталога с ценой за ${monthNom} — критично`);
+  if (backlog != null && backlog !== "" && Number(backlog) > 0) {
+    lines.push(`• ждут повтора после ошибки: ${n(backlog)}`);
   }
 
   return lines;
@@ -390,11 +348,18 @@ function buildReportText(env = process.env) {
     `(${kind})`,
     "",
     "Этот залп:",
+  ];
+  const burstQueued = Number(catalog.burstQueued);
+  const burstLimit = Number(catalog.burstLimit) || 60;
+  if (Number.isFinite(burstQueued) && burstQueued > 0) {
+    lines.push(`• в очереди на съём: ${burstQueued} (цель ${burstLimit})`);
+  }
+  lines.push(
     `• запросили цену у ${n(catalog.chunkDone)} позиций`,
     `• цену получили: ${n(catalog.chunkOkWithPrices)}${
       chunkPct != null ? ` (${chunkPct}%, цель >${SUCCESS_PCT_TARGET}%)` : ""
-    }`,
-  ];
+    }`
+  );
   if (chunkNoData > 0) {
     lines.push(`• на сайте пусто (цены нет): ${chunkNoData}`);
   }
