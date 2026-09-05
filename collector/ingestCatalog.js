@@ -124,7 +124,6 @@ async function alreadyOkThisPeriod(db, catalogItemId, periodId, cat) {
 }
 
 /** Do not re-scrape a hot shell for a day; advance the cursor instead. */
-const SOFT_BLOCK_SKIP_MS = 24 * 60 * 60 * 1000;
 /** Consecutive soft-blocks on the same base number (8831-1, 8831-2, …) before skipping the rest. */
 const SAME_BASE_SOFT_JUMP = 2;
 /** Distinct bases that soft-blocked this window before we treat the IP as hot. */
@@ -155,17 +154,6 @@ function tsToMs(v) {
 
 function isSoftBlockTag(tag, err) {
   return errorLooksLikeSoftBlock(tag, err);
-}
-
-async function recentlySoftBlocked(db, catalogItemId, maxAgeMs = SOFT_BLOCK_SKIP_MS) {
-  const obsId = observationDocId(catalogItemId, "bricklink");
-  const snap = await db.collection("market_observations").doc(obsId).get();
-  if (!snap.exists) return false;
-  const d = snap.data() || {};
-  if (!isSoftBlockTag(d.errorTag, d.error)) return false;
-  const ms = tsToMs(d.updatedAt) || tsToMs(d.capturedAt);
-  if (ms == null) return false;
-  return Date.now() - ms < maxAgeMs;
 }
 
 function mapCatalogDoc(doc) {
