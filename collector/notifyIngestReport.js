@@ -212,6 +212,12 @@ function buildAnalysis({ conclusion, catalog, retry, chunkPct, chunkDone, chunkO
         trips === 1 ? "волна" : trips < 5 ? "волны" : "волн"
       }).`
     );
+  } else if (trips > 0) {
+    lines.push(
+      `Была жара сайта (${trips} ${
+        trips === 1 ? "волна" : trips < 5 ? "волны" : "волн"
+      }) — окно охладилось и продолжило.`
+    );
   } else if (chunkPct != null && Number(chunkPct) >= SUCCESS_PCT_TARGET) {
     lines.push("Залп прошёл нормально — почти все запросы дали цены.");
   } else if (chunkPct != null && Number(chunkPct) < SUCCESS_PCT_TARGET) {
@@ -296,6 +302,17 @@ function buildCoverageLines(kpi, chunkOk, opts = {}) {
     lines.push(
       `• в целом с ценой в базе: ${n(kpi.anyOkPrimary)} из ${n(kpi.catalogPrimary)}`
     );
+  }
+
+  const dayOk = Number(kpi.dayOkWithPrices);
+  const dayTarget =
+    Number(kpi.dayOkTarget) > 0
+      ? Number(kpi.dayOkTarget)
+      : Number(kpi.okPerDayTarget) > 0
+        ? Number(kpi.okPerDayTarget)
+        : 1150;
+  if (Number.isFinite(dayOk) && dayOk >= 0) {
+    lines.push(`• темп дня: ${dayOk} / ${dayTarget} (цель >${dayTarget})`);
   }
 
   if (backlog != null && backlog !== "" && Number(backlog) > 0) {

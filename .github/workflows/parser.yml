@@ -2,15 +2,14 @@
 # Needs secret FIREBASE_SERVICE_ACCOUNT_DEV.
 # Optional: TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID, BL_PROXY_URL.
 #
-# One cron per workflow file (hourly). Two files (A@:18 B@:48) ~= every 30 min.
-# Days 1-26 UTC enforced in job "gate".
+# Kick-only: Firebase kickBifCollector every 30 min (workflow_dispatch).
+# No on.schedule here — GHA cron duplicated kicks and cancelled in-progress runs.
+# Days 1-26 UTC still enforced in kick + gate.
 # mode=month_end → только KPI + итоговый отчёт за месяц (пинк 26-го ~23:00 UTC).
 
 name: BIF collector
 
 on:
-  schedule:
-    - cron: "40 * * * *"
   workflow_dispatch:
     inputs:
       reason:
@@ -26,13 +25,13 @@ on:
         required: false
         default: "60"
       maxMinutes:
-        description: "Catalog burst max minutes"
+        description: "Catalog burst max minutes (cool-and-continue needs headroom)"
         required: false
-        default: "15"
+        default: "20"
 
 concurrency:
   group: ${{ github.event.inputs.mode == 'month_end' && 'bif-month-end' || 'bif-collector-public' }}
-  cancel-in-progress: ${{ github.event.inputs.mode != 'month_end' }}
+  cancel-in-progress: false
 
 jobs:
   gate:
@@ -51,7 +50,7 @@ jobs:
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
           if [ "$mode" = "month_end" ]; then
             echo "go=true" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event_name }}" = "schedule" ] && [ "$d" -gt 26 ]; then
+          elif [ "$d" -gt 26 ] && [ "${{ github.event.inputs.reason || 'owner' }}" = "schedule" ]; then
             echo "go=false" >> "$GITHUB_OUTPUT"
             echo "Schedule idle after day 26"
           else
@@ -67,12 +66,12 @@ jobs:
       DEV_PROJECT_ID: brickinfuture-306f1
       BL_RAW_ONLY: "1"
       BL_PARSE_TIMEOUT_MS: "90000"
-      BL_PAUSE_MS: "400,800"
+      BL_PAUSE_MS: "800,1600"
       BL_SOFT_BLOCK_FAST_MS: "3000"
       BL_CIRCUIT_SOFT_LIMIT: "5"
-      BL_CIRCUIT_STOP: "1"
-      BL_CIRCUIT_COOL_MIN_MS: "60000"
-      BL_CIRCUIT_COOL_MAX_MS: "120000"
+      BL_CIRCUIT_STOP: "0"
+      BL_CIRCUIT_COOL_MIN_MS: "120000"
+      BL_CIRCUIT_COOL_MAX_MS: "240000"
       BL_ADAPTIVE_PAUSE: "0"
       BL_CURRENT_MONTH_BUDGET: "50"
       BL_HISTORICAL_GAP_BUDGET: "10"
@@ -122,7 +121,7 @@ jobs:
       - name: Catalog ingest chunk
         env:
           LIMIT: ${{ github.event.inputs.limit || '60' }}
-          MAX_MINUTES: ${{ github.event.inputs.maxMinutes || '15' }}
+          MAX_MINUTES: ${{ github.event.inputs.maxMinutes || '20' }}
         run: npm run ingest:catalog -- --confirm --phase=primary --limit="$LIMIT" --maxMinutes="$MAX_MINUTES"
 
       - name: Retry failed observations

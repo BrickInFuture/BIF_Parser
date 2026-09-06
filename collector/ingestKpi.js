@@ -14,6 +14,7 @@ const { runDocId, patchRun } = require("./checkpoint");
 const { PRIMARY_TYPES } = require("./ingestTypes");
 const { writeIngestArtifact } = require("./ingestReportArtifacts");
 const { observationHasPricedSignal } = require("./marketPoint");
+const { readDayPace, DAY_PACE_TARGET } = require("./collectorGate");
 
 function flagValue(name, fallback = null) {
   const prefix = `--${name}=`;
@@ -188,7 +189,7 @@ async function main() {
       : DAYS;
   const okPerDayFresh =
     freshOk > 0 ? Math.round((freshOk / Math.min(DAYS, freshSpanDays || DAYS)) * 10) / 10 : null;
-  const okPerDayTarget = Math.max(1, Number(process.env.BL_OK_PER_DAY_TARGET) || 2000);
+  const okPerDayTarget = Math.max(1, Number(process.env.BL_OK_PER_DAY_TARGET) || DAY_PACE_TARGET);
   const pricedPctPrimary =
     catalogPrimary > 0 ? Math.round((freshOkPrimary / catalogPrimary) * 1000) / 10 : null;
   const monthPricedPctPrimary =
@@ -200,6 +201,14 @@ async function main() {
       ? Math.round((Number(run.okWithPrices) / runDays) * 10) / 10
       : null;
   const coverageTargetPct = Math.max(1, Number(process.env.BL_COVERAGE_TARGET_PCT) || 98);
+
+  let dayPace = { utcDay: null, okWithPrices: 0, target: okPerDayTarget };
+  try {
+    dayPace = await readDayPace(db);
+    dayPace.target = okPerDayTarget;
+  } catch (e) {
+    console.warn("readDayPace failed:", e && e.message ? e.message : e);
+  }
 
   const prevMonthUnique = Number(run.monthUniqueWithPrices);
   const hadPrevMonthUnique = Number.isFinite(prevMonthUnique) && prevMonthUnique >= 0 && run.kpiUpdatedAt;
@@ -243,6 +252,9 @@ async function main() {
     okPerDayFresh,
     okPerDayWithPrices: okWithPricesPerDay,
     okPerDayTarget,
+    dayOkWithPrices: Number(dayPace.okWithPrices) || 0,
+    dayOkUtcDay: dayPace.utcDay || null,
+    dayOkTarget: okPerDayTarget,
     avgSecOk,
     avgSecSoft,
     softAvgUnder8s: avgSecSoft == null ? null : avgSecSoft < 8,

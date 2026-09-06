@@ -64,6 +64,7 @@ const {
   recentlySoftBlocked,
 } = require("./gapQueue");
 const { writeIngestArtifact } = require("./ingestReportArtifacts");
+const { markCollectorHot, bumpDayPace } = require("./collectorGate");
 
 function flagValue(name, fallback = null) {
   const prefix = `--${name}=`;
@@ -365,6 +366,22 @@ async function main() {
   let lastSoftBaseKey = null;
   const mixedSoftBases = new Set();
   let circuitOpenThisWindow = false;
+  let lastCircuitTrips = 0;
+  let hotMarkedThisWindow = false;
+
+  async function noteCollectorHeat(reason) {
+    if (!CONFIRM || hotMarkedThisWindow) return;
+    const trips = Number(session.circuitTrips) || 0;
+    if (trips > lastCircuitTrips || circuitOpenThisWindow || stopWindow) {
+      lastCircuitTrips = Math.max(lastCircuitTrips, trips);
+      hotMarkedThisWindow = true;
+      try {
+        await markCollectorHot(db, admin.firestore, reason || "soft_block_circuit");
+      } catch (e) {
+        console.warn("markCollectorHot failed:", e && e.message ? e.message : e);
+      }
+    }
+  }
   // Очередь страницы/дыр снаружи try — прыжок курсора должен уметь её сбросить.
   let pendingItems = [];
   /** После волны «сайт режет» не забиваем окно снова очередью дыр (она отменяла прыжок). */
@@ -1141,6 +1158,7 @@ async function main() {
             skipBaseKey = catalogBaseKey(cat.itemType, cat.itemNumber);
             stopWindow = true;
             console.log(JSON.stringify({ step: "catalog_stop_circuit", error: lastError }));
+            await noteCollectorHeat("circuit_open_throw");
             break;
           }
           console.error(`FAIL ${fetchNo}:`, lastError);
@@ -1168,6 +1186,7 @@ async function main() {
           if (isSoftBlockTag("exception", lastError)) {
             const cluster = applyClusterAfterSoft(cat);
             if (cluster?.needsCursorJump) await jumpCursorPastHotZone("mixed_soft_exception");
+            await noteCollectorHeat("soft_block_exception");
           }
           continue;
         }
@@ -1201,10 +1220,12 @@ async function main() {
           if (isSoftBlockTag(scrape.errorTag, lastError)) {
             const cluster = applyClusterAfterSoft(cat);
             if (cluster?.needsCursorJump) await jumpCursorPastHotZone("mixed_soft_block");
+            await noteCollectorHeat("soft_block_circuit");
           } else if (session.isCircuitOpen()) {
             circuitOpenThisWindow = true;
             lastError = "circuit_open_stop_window";
             stopWindow = true;
+            await noteCollectorHeat("circuit_open");
           }
           if (stopWindow) break;
           continue;
@@ -1339,6 +1360,16 @@ async function main() {
       },
       false
     );
+    if (chunkOkWithPrices > 0) {
+      try {
+        await bumpDayPace(db, admin.firestore, chunkOkWithPrices);
+      } catch (e) {
+        console.warn("bumpDayPace failed:", e && e.message ? e.message : e);
+      }
+    }
+    if ((Number(session.circuitTrips) || 0) > 0 || circuitOpenThisWindow) {
+      await noteCollectorHeat("window_end_circuit");
+    }
   }
 
   const avgSecOk =
