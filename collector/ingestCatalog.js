@@ -62,6 +62,8 @@ const {
   resolveBurstBudgets,
   currentMonthNeedsScrape,
   recentlySoftBlocked,
+  observationAlreadyPriced,
+  currentUtcMonthHasPrice,
 } = require("./gapQueue");
 const { writeIngestArtifact } = require("./ingestReportArtifacts");
 const { markCollectorHot, bumpDayPace } = require("./collectorGate");
@@ -1048,10 +1050,18 @@ async function main() {
         }
 
         // Cursor: текущий месяц уже есть (ok или no_data) → мимо.
-        // Gap: текущий есть, но остались несмотренные старые дыры → можно добрать.
+        // Gap: текущий есть, но остались несмотренные старые дыры → можно добрать
+        // только если цены ещё нет (иначе повтор «уже с ценой»).
         if (await alreadyOkThisPeriod(db, cat.catalogItemId, periodId, cat)) {
           if (source === "gap") {
             const slots = await findGapSlotsForItem(db, cat, periodId);
+            if (currentUtcMonthHasPrice(slots) || (await observationAlreadyPriced(db, cat.catalogItemId))) {
+              skipped += 1;
+              processed += 1;
+              console.log(`SKIP ${setNo} (already priced — no re-scrape)`);
+              gapHandled.add(cat.catalogItemId);
+              continue;
+            }
             if (!hasBlFillableGap(slots)) {
               skipped += 1;
               processed += 1;
@@ -1065,6 +1075,21 @@ async function main() {
             console.log(`SKIP ${setNo} (already ok ${periodId})`);
             continue;
           }
+        }
+
+        // Зрелые «протухли по TTL», но цена уже есть и месяц закрыт — не обновляем снова.
+        if (
+          CONFIRM &&
+          cat._coverage &&
+          String(cat._coverage.reason || "") === "mature_stale" &&
+          !(await currentMonthNeedsScrape(db, cat, periodId)) &&
+          (await observationAlreadyPriced(db, cat.catalogItemId))
+        ) {
+          skipped += 1;
+          processed += 1;
+          console.log(`SKIP ${setNo} (already priced — skip TTL refresh)`);
+          if (source === "gap") gapHandled.add(cat.catalogItemId);
+          continue;
         }
 
         if (cat.blFetch?.skip) {

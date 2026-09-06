@@ -12,7 +12,7 @@ const PACE_DOC = "bif_collector_pace";
 /** How long kick skips after a soft-block / circuit wave (ms). */
 const HOT_COOL_MS = Math.max(
   60_000,
-  Number(process.env.BL_HOT_UNTIL_MS) || 120 * 60 * 1000
+  Number(process.env.BL_HOT_UNTIL_MS) || 60 * 60 * 1000
 );
 
 const DAY_PACE_TARGET = Math.max(1, Number(process.env.BL_OK_PER_DAY_TARGET) || 1150);

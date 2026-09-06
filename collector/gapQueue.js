@@ -24,7 +24,7 @@ const {
   lastClosedUtcYearMonth,
   utcYearMonth,
 } = require("./gapLedger");
-const { LEDGER_STATUS } = require("./marketPoint");
+const { LEDGER_STATUS, observationHasPricedSignal } = require("./marketPoint");
 const { scoreCatalogPriority, catalogReleaseYear } = require("./catalogPriority");
 const { errorLooksLikeSoftBlock } = require("./parseHtml");
 const { PRIMARY_TYPES, typePriorityRank } = require("./ingestTypes");
@@ -51,6 +51,24 @@ async function recentlySoftBlocked(db, catalogItemId, maxAgeMs = SOFT_BLOCK_SKIP
   const ms = tsToMs(d.updatedAt) || tsToMs(d.capturedAt);
   if (ms == null) return false;
   return Date.now() - ms < maxAgeMs;
+}
+
+/** У позиции уже есть реальная цена (sold) в корне observation. */
+async function observationAlreadyPriced(db, catalogItemId) {
+  const obsId = observationDocId(catalogItemId, "bricklink");
+  const snap = await db.collection("market_observations").doc(obsId).get();
+  if (!snap.exists) return false;
+  return observationHasPricedSignal(snap.data() || {});
+}
+
+/** Текущий UTC-месяц уже с ценой (sold/stock) — не тратить залп на повтор. */
+function currentUtcMonthHasPrice(slots, nowMs = Date.now()) {
+  const currentUtc = utcYearMonth(new Date(nowMs));
+  const slot = (slots || []).find((s) => s.periodId === currentUtc);
+  if (!slot) return false;
+  return (
+    slot.status === LEDGER_STATUS.OK_SOLD || slot.status === LEDGER_STATUS.OK_STOCK
+  );
 }
 
 /**
@@ -158,10 +176,12 @@ function currentUtcMonthClosed(slots, nowMs = Date.now()) {
 /**
  * Coverage говорит skip, но в ledger есть **несмотренные** дыры (status=gap) —
  * можно скрейпить. Месяцы no_data («смотрели, пусто») уже закрыты и сюда не попадают.
+ * Если текущий месяц уже с ценой — повтор ради старых дыр запрещён (слоты на покрытие).
  */
 function scrapeDespiteCoverageSkip(source, coverage, slots, nowMs = Date.now()) {
   if (!coverage || !coverage.skip) return false;
   if (!hasBlFillableGap(slots, nowMs)) return false;
+  if (currentUtcMonthHasPrice(slots, nowMs)) return false;
   if (String(source || "") === "gap") return true;
   return true;
 }
@@ -269,6 +289,11 @@ async function fetchGapQueue(db, admin, opts) {
           if (!gaps.length || !hasBlFillableGap(slots, nowMs)) continue;
           currentClosed = currentUtcMonthClosed(slots, nowMs);
           if (onlyHistoricalGaps && !currentClosed) continue;
+          // Уже с ценой — не жжём слот на старые дыры / повтор.
+          if (onlyHistoricalGaps || currentClosed) {
+            if (currentUtcMonthHasPrice(slots, nowMs)) continue;
+            if (await observationAlreadyPriced(db, doc.id)) continue;
+          }
           if (!onlyHistoricalGaps && currentClosed && !hasBlFillableGap(slots, nowMs)) continue;
         }
 
@@ -325,6 +350,8 @@ module.exports = {
   findGapSlotsForItem,
   currentMonthNeedsScrape,
   currentUtcMonthClosed,
+  currentUtcMonthHasPrice,
+  observationAlreadyPriced,
   hasBlFillableGap,
   scrapeDespiteCoverageSkip,
   scoreGapTask,

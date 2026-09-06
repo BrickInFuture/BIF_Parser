@@ -1,6 +1,7 @@
 /**
- * Scrape order: novelty (new launches) first, then newer release year, then popular themes.
+ * Scrape order: novelty → newer release year → fan theme rank.
  * Used by ingestCatalog.js at window start + within each catalog page.
+ * Канон: BIF_parser.md § Приоритет тем.
  */
 "use strict";
 
@@ -12,45 +13,6 @@ const {
 
 const { PRIMARY_TYPES } = require("./ingestTypes");
 
-/** themePrimary values as stored in catalog_items (Brickset Theme). */
-const POPULAR_THEMES = [
-  "Star Wars",
-  "Star Wars™",
-  "Ninjago",
-  "NINJAGO",
-  "City",
-  "Technic",
-  "Creator",
-  "Harry Potter",
-  "Harry Potter™",
-  "Marvel Super Heroes",
-  "Super Mario",
-  "Super Mario™",
-  "Minecraft",
-  "Minecraft®",
-  "Friends",
-  "Speed Champions",
-  "Icons",
-  "Ideas",
-  "Architecture",
-  "DREAMZzz",
-  "Monkie Kid",
-  "Animal Crossing",
-  "Fortnite",
-  "Avatar",
-  "Disney",
-  "Disney™",
-  "Jurassic World",
-  "Jurassic World™",
-  "DC Comics Super Heroes",
-  "Spider-Man",
-  "The Legend of Zelda",
-  "Collectable Minifigures",
-  "Classic",
-  "Duplo",
-  "DUPLO",
-];
-
 function normalizeThemeKey(v) {
   return String(v || "")
     .trim()
@@ -59,20 +21,129 @@ function normalizeThemeKey(v) {
     .replace(/\s+/g, " ");
 }
 
-const POPULAR_THEME_KEYS = new Set(POPULAR_THEMES.map(normalizeThemeKey));
+/**
+ * Темы по убыванию интереса фанатов / вторички (выше = раньше в очереди).
+ * Каждая строка — алиасы одной ступени (Brickset themePrimary).
+ * Duplo — в самом низу (штраф ниже «неизвестной» темы).
+ */
+const THEME_PRIORITY_GROUPS = [
+  ["Star Wars", "Star Wars™"],
+  ["Icons"],
+  ["Creator Expert"],
+  ["Advanced models"],
+  ["Technic"],
+  ["Harry Potter", "Harry Potter™"],
+  ["Marvel Super Heroes"],
+  ["Spider-Man"],
+  ["DC Comics Super Heroes"],
+  ["Ninjago", "NINJAGO"],
+  ["Architecture"],
+  ["Ideas"],
+  ["Speed Champions"],
+  ["BrickHeadz"],
+  ["Minecraft", "Minecraft®"],
+  ["City"],
+  ["Creator"],
+  ["Super Mario", "Super Mario™"],
+  ["Jurassic World", "Jurassic World™"],
+  ["Disney", "Disney™"],
+  ["Castle"],
+  ["Space"],
+  ["Pirates"],
+  ["Collectable Minifigures"],
+  ["DREAMZzz", "Dreamzzz"],
+  ["Monkie Kid"],
+  ["The Legend of Zelda"],
+  ["Fortnite"],
+  ["Animal Crossing"],
+  ["Avatar"],
+  ["Botanicals"],
+  ["Classic"],
+  ["Bionicle"],
+  ["Mindstorms"],
+  ["Trains"],
+  ["Promotional"],
+  ["Education"],
+  ["Friends"],
+  ["Juniors"],
+  ["Explore"],
+  ["Primo"],
+  ["Baby"],
+  ["Duplo", "DUPLO"],
+];
+
+/** Плоский список имён (для Firestore `in` и обратной совместимости). */
+const POPULAR_THEMES = THEME_PRIORITY_GROUPS.flat();
+
+/** Ступени без Duplo/дошколки — ими греем prefetch, не тратим слоты на хвост. */
+const THEME_PREFETCH_GROUPS = THEME_PRIORITY_GROUPS.filter((g) => {
+  const k = normalizeThemeKey(g[0]);
+  return k !== "duplo" && k !== "juniors" && k !== "explore" && k !== "primo" && k !== "baby";
+});
+
+const THEME_PREFETCH_NAMES = THEME_PREFETCH_GROUPS.flat();
+
+/** Макс. буст темы (Star Wars). Шаг между соседними ступенями. */
+const THEME_BOOST_TOP = 120;
+const THEME_BOOST_STEP = 3;
+/** Ниже нуля: тема позже «безымянных». Duplo — ещё ниже дошколки. */
+const THEME_BOOST_PRESCHOOL = -40;
+const THEME_BOOST_DUPLO = -120;
+
+/** @type {Map<string, number>} normalized key → group index (0 = highest) */
+const THEME_RANK_BY_KEY = new Map();
+for (let i = 0; i < THEME_PRIORITY_GROUPS.length; i++) {
+  for (const name of THEME_PRIORITY_GROUPS[i]) {
+    THEME_RANK_BY_KEY.set(normalizeThemeKey(name), i);
+  }
+}
+
+const DUPLO_GROUP_INDEX = THEME_PRIORITY_GROUPS.findIndex(
+  (g) => normalizeThemeKey(g[0]) === "duplo"
+);
+const PRESCHOOL_KEYS = new Set(["juniors", "explore", "primo", "baby"]);
 
 function pickThemeKey(cat) {
   return normalizeThemeKey(cat?.themePrimary || cat?.theme || "");
 }
 
-function isPopularTheme(cat) {
-  const k = pickThemeKey(cat);
-  if (!k) return false;
-  if (POPULAR_THEME_KEYS.has(k)) return true;
-  for (const p of POPULAR_THEME_KEYS) {
-    if (k.includes(p) || p.includes(k)) return true;
+/**
+ * Индекс ступени (0 = Star Wars) или null, если темы нет в таблице.
+ * @param {object|string} catOrTheme
+ */
+function themeRankIndex(catOrTheme) {
+  const k =
+    typeof catOrTheme === "string" ? normalizeThemeKey(catOrTheme) : pickThemeKey(catOrTheme);
+  if (!k) return null;
+  if (THEME_RANK_BY_KEY.has(k)) return THEME_RANK_BY_KEY.get(k);
+  for (const [key, idx] of THEME_RANK_BY_KEY) {
+    if (k.includes(key) || key.includes(k)) return idx;
   }
-  return false;
+  return null;
+}
+
+/**
+ * Добавка к score за тему. Выше = раньше съём.
+ * Неизвестная тема = 0 (выше Duplo и дошколки).
+ */
+function themePriorityBoost(cat) {
+  const k = pickThemeKey(cat);
+  if (!k) return 0;
+  if (k === "duplo" || k.includes("duplo")) return THEME_BOOST_DUPLO;
+  if (PRESCHOOL_KEYS.has(k) || [...PRESCHOOL_KEYS].some((p) => k.includes(p))) {
+    return THEME_BOOST_PRESCHOOL;
+  }
+  const idx = themeRankIndex(cat);
+  if (idx == null) return 0;
+  if (idx === DUPLO_GROUP_INDEX) return THEME_BOOST_DUPLO;
+  const groupKey = normalizeThemeKey(THEME_PRIORITY_GROUPS[idx][0]);
+  if (PRESCHOOL_KEYS.has(groupKey)) return THEME_BOOST_PRESCHOOL;
+  return Math.max(0, THEME_BOOST_TOP - idx * THEME_BOOST_STEP);
+}
+
+/** Тема с положительным бустом (для тестов / отчётов). */
+function isPopularTheme(cat) {
+  return themePriorityBoost(cat) > 0;
 }
 
 /** Год выпуска набора (для порядка «сначала новые годы»). */
@@ -89,7 +160,7 @@ function catalogReleaseYear(cat) {
 
 /**
  * Higher score = scrape sooner.
- * Порядок: новинки → год выпуска убывающий → популярные темы.
+ * Порядок: новинки → год выпуска убывающий → ранг темы (фанаты).
  * @param {object} cat
  * @param {{ skip?: boolean, reason?: string, cohort?: string, launchMs?: number|null }} [coverage]
  */
@@ -115,10 +186,9 @@ function scoreCatalogPriority(cat, coverage = {}) {
     score += 120;
   }
 
-  if (isPopularTheme(cat)) {
-    score += 50;
-    if (classif.cohort === "novelty") score += 100;
-  }
+  const themeBoost = themePriorityBoost(cat);
+  score += themeBoost;
+  if (themeBoost > 0 && classif.cohort === "novelty") score += 100;
 
   return score;
 }
@@ -133,6 +203,9 @@ function sortCatalogByPriority(items, coverageById = null) {
     const yb = catalogReleaseYear(b);
     const ya = catalogReleaseYear(a);
     if (yb !== ya) return yb - ya;
+    const tb = themePriorityBoost(b);
+    const ta = themePriorityBoost(a);
+    if (tb !== ta) return tb - ta;
     return String(a.catalogItemId).localeCompare(String(b.catalogItemId));
   });
 }
@@ -181,8 +254,8 @@ async function fetchPriorityCandidates(db, admin, opts = {}) {
   }
 
   const themeBatches = [];
-  for (let i = 0; i < POPULAR_THEMES.length; i += 10) {
-    themeBatches.push(POPULAR_THEMES.slice(i, i + 10));
+  for (let i = 0; i < THEME_PREFETCH_NAMES.length; i += 10) {
+    themeBatches.push(THEME_PREFETCH_NAMES.slice(i, i + 10));
   }
 
   for (const itemType of types) {
@@ -225,8 +298,14 @@ async function fetchPriorityCandidates(db, admin, opts = {}) {
 }
 
 module.exports = {
+  THEME_PRIORITY_GROUPS,
   POPULAR_THEMES,
+  THEME_BOOST_TOP,
+  THEME_BOOST_DUPLO,
+  THEME_BOOST_PRESCHOOL,
   normalizeThemeKey,
+  themeRankIndex,
+  themePriorityBoost,
   isPopularTheme,
   catalogReleaseYear,
   scoreCatalogPriority,
