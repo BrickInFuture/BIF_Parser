@@ -19,6 +19,7 @@ const { utcYearMonth } = require("./gapLedger");
 const { loadOrCreateRun, patchRun, runDocId } = require("./checkpoint");
 const { resolveMarketFetch } = require("./blUrls");
 const { writeIngestArtifact } = require("./ingestReportArtifacts");
+const { markCollectorHot } = require("./collectorGate");
 const {
   PRIMARY_TYPES,
   SECONDARY_TYPES,
@@ -404,6 +405,13 @@ async function main() {
       },
       false
     );
+    if ((Number(session.circuitTrips) || 0) > 0) {
+      try {
+        await markCollectorHot(db, admin.firestore, "retry_circuit");
+      } catch (e) {
+        console.warn("markCollectorHot failed:", e && e.message ? e.message : e);
+      }
+    }
   }
 
   const summary = {
