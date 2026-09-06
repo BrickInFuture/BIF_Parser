@@ -1,7 +1,7 @@
 /**
  * Retry failed observations that failed this month (status=error).
  *
- * Prefers SET + MINIFIG. Secondary types (BOX / INSTRUCTION / GEAR) only when
+ * Prefers SET → MINIFIG → GEAR. Secondary types (BOX / INSTRUCTION) only when
  * primary errors are empty or --phase=secondary / --types=… overrides.
  *
  *   npm run ingest:retry -- --confirm --limit=100 --maxMinutes=60

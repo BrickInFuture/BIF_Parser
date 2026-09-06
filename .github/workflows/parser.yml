@@ -21,7 +21,7 @@ on:
         required: false
         default: "burst"
       limit:
-        description: "Max items per short burst (SET+MINIFIG); stay under IP heat (~60)"
+        description: "Max items per short burst (SET→MINIFIG→GEAR); stay under IP heat (~60)"
         required: false
         default: "60"
       maxMinutes:

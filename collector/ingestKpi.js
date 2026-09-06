@@ -239,7 +239,7 @@ async function main() {
     staleOrMissingPrimary,
     coveragePctPrimary,
     pricedPctPrimary,
-    /** Главное для отчёта: разные SET+MINIFIG с ценой, снятой в этом UTC-месяце. */
+    /** Главное для отчёта: разные SET+MINIFIG+GEAR с ценой, снятой в этом UTC-месяце. */
     monthOkPrimary,
     monthNoDataPrimary,
     monthPricedPctPrimary,
@@ -320,7 +320,7 @@ async function main() {
     const lines = [
       "",
       `## Collector ${periodId} month + ${DAYS}d KPI`,
-      `- catalog primary (SET+MINIFIG): \`${catalogPrimary}\``,
+      `- catalog primary (SET→MINIFIG→GEAR): \`${catalogPrimary}\``,
       `- **month unique with prices**: \`${monthOkPrimary}\` (**${monthPricedPctPrimary ?? "n/a"}%**)`,
       `- month unique delta vs last KPI: \`${monthUniqueDelta ?? "n/a"}\``,
       `- rolling ${DAYS}d priced: \`${freshOkPrimary}\` (${pricedPctPrimary ?? "n/a"}%)`,

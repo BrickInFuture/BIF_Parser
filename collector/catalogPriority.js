@@ -10,6 +10,8 @@ const {
   DAY_MS,
 } = require("./coveragePolicy");
 
+const { PRIMARY_TYPES } = require("./ingestTypes");
+
 /** themePrimary values as stored in catalog_items (Brickset Theme). */
 const POPULAR_THEMES = [
   "Star Wars",
@@ -147,7 +149,7 @@ function sortCatalogByPriorityLight(items) {
  * @param {{ types?: string[], maxCandidates?: number, periodId: string, mapCatalogDoc: Function, resolveCoverage: Function }} opts
  */
 async function fetchPriorityCandidates(db, admin, opts = {}) {
-  const types = (opts.types || ["SET", "MINIFIG"]).map((t) => String(t).toUpperCase());
+  const types = (opts.types || PRIMARY_TYPES).map((t) => String(t).toUpperCase());
   const maxCandidates = Math.max(1, Number(opts.maxCandidates) || 80);
   const periodId = opts.periodId;
   const mapCatalogDoc = opts.mapCatalogDoc;

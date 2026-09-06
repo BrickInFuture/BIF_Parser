@@ -250,8 +250,8 @@ function buildAnalysis({ conclusion, catalog, retry, chunkPct, chunkDone, chunkO
 
 /**
  * Покрытие каталога — ровно две метрики владельца:
- *   1) свежие цены (~28 дней) из всех SET+MINIFIG
- *   2) в целом наборы с любой ценой в базе
+ *   1) свежие цены (~28 дней) из SET+MINIFIG+GEAR
+ *   2) в целом позиции с любой ценой в базе
  */
 function buildCoverageLines(kpi, chunkOk, opts = {}) {
   const lines = [];
@@ -275,7 +275,7 @@ function buildCoverageLines(kpi, chunkOk, opts = {}) {
   const burstDidNotRun = opts.burstDidNotRun === true;
   const days = Number(kpi.days) > 0 ? Number(kpi.days) : 28;
 
-  lines.push(`Покрытие (наборы + минифиги) ${coverMark}`);
+  lines.push(`Покрытие (наборы + минифиги + gear) ${coverMark}`);
   if (burstDidNotRun) {
     lines.push("• залп не писал цены — ниже без изменений с прошлого успешного съёма");
   }

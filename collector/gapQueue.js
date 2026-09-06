@@ -27,6 +27,7 @@ const {
 const { LEDGER_STATUS } = require("./marketPoint");
 const { scoreCatalogPriority, catalogReleaseYear } = require("./catalogPriority");
 const { errorLooksLikeSoftBlock } = require("./parseHtml");
+const { PRIMARY_TYPES, typePriorityRank } = require("./ingestTypes");
 
 /** Не ставить в очередь то, что уже резали <24ч — иначе 60 слотов сгорают на SKIP. */
 const SOFT_BLOCK_SKIP_MS = 24 * 60 * 60 * 1000;
@@ -196,7 +197,7 @@ function scoreGapTask(cat, slots, currentPeriodId, coverage, nowMs = Date.now())
  * @param {{ onlyCurrentMonthGap?: boolean, onlyHistoricalGaps?: boolean }} [opts]
  */
 async function fetchGapQueue(db, admin, opts) {
-  const types = (opts.types || ["SET", "MINIFIG"]).map((t) => String(t).toUpperCase());
+  const types = (opts.types || PRIMARY_TYPES).map((t) => String(t).toUpperCase());
   const maxTasks = Math.max(1, Number(opts.maxTasks) || 80);
   // Текущий месяц: лёгкая проверка → можно сканировать далеко.
   // Старые дыры: полный ledger дороже → умеренный лимит.
@@ -307,6 +308,9 @@ async function fetchGapQueue(db, admin, opts) {
   }
 
   candidates.sort((a, b) => {
+    const ta = typePriorityRank(a.cat?.itemType);
+    const tb = typePriorityRank(b.cat?.itemType);
+    if (ta !== tb) return ta - tb;
     if (b.score !== a.score) return b.score - a.score;
     const yb = catalogReleaseYear(b.cat);
     const ya = catalogReleaseYear(a.cat);

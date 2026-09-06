@@ -3,14 +3,14 @@
  *
  * Coverage / calendar rules: see PARSING_RULES.md
  *
- * Default (auto): SET + MINIFIG first. BOX / INSTRUCTION / GEAR only after primary
+ * Default (auto): SET → MINIFIG → GEAR first. BOX / INSTRUCTION only after primary
  * is exhausted for the month AND days remain (≤27 Moscow).
- * GHA scheduled runs use --phase=primary only (days 1–15).
+ * GHA scheduled runs use --phase=primary only (days 1–26).
  *
  *   npm run ingest:catalog -- --confirm --limit=500
  *   npm run ingest:catalog -- --confirm --phase=primary
  *   npm run ingest:catalog -- --confirm --phase=secondary
- *   npm run ingest:catalog -- --confirm --types=SET,MINIFIG
+ *   npm run ingest:catalog -- --confirm --types=SET,MINIFIG,GEAR
  *   npm run ingest:catalog -- --confirm --shardIndex=0 --shardCount=2
  *
  * Checkpoint: price_ingest_runs/market_{YYYY-MM} (or …_s{N} for shards)
@@ -583,23 +583,9 @@ async function main() {
     typeCursors[cursorType] = cursorCatalogId || null;
   }
 
-  /** Round-robin across remaining active types so MINIFIG is not starved behind SET. */
+  /** Stay on current type until exhausted (priority: SET → MINIFIG → GEAR). No round-robin. */
   function rotateTypeAfterPage() {
-    if (activeTypes.length <= 1) return;
     persistTypeCursor();
-    typeIndex = (typeIndex + 1) % activeTypes.length;
-    cursorType = activeTypes[typeIndex];
-    cursorCatalogId = typeCursors[cursorType] || null;
-    cursorItemNumber = null;
-    console.log(
-      JSON.stringify({
-        step: "catalog_rotate_type",
-        cursorType,
-        typeIndex,
-        activeTypes,
-        cursorCatalogId,
-      })
-    );
   }
 
   function advanceToNextType() {
@@ -776,23 +762,20 @@ async function main() {
         }
       }
 
-      // Обход каталога: только те, у кого текущий месяц ещё дыра.
+      // Обход каталога по приоритету типов: SET → MINIFIG → GEAR (без чередования).
       let padTypeIndex = 0;
       let padCursorId = null;
-      let emptyTypes = 0;
       let scanned = 0;
       const maxPadScan = Math.max((target - out.length) * 400, 12000);
-      while (out.length < target && scanned < maxPadScan && emptyTypes < activeTypes.length) {
-        const t = activeTypes[padTypeIndex % activeTypes.length];
+      while (out.length < target && scanned < maxPadScan && padTypeIndex < activeTypes.length) {
+        const t = activeTypes[padTypeIndex];
         const page = await fetchCatalogPageByType(db, admin, t, padCursorId, 50);
         scanned += page.length || 1;
         if (!page.length) {
-          emptyTypes += 1;
           padTypeIndex += 1;
           padCursorId = null;
           continue;
         }
-        emptyTypes = 0;
         padCursorId = page[page.length - 1].catalogItemId;
         for (const cat of page) {
           if (out.length >= target) break;
@@ -812,7 +795,6 @@ async function main() {
             targetPeriodId: periodId,
           });
         }
-        padTypeIndex += 1;
       }
 
       return out.slice(0, target);

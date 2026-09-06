@@ -1,14 +1,14 @@
 /**
  * Price-ingest type phases.
  *
- * Primary (always first): SET + MINIFIG
+ * Primary (GHA / kick, order = priority): SET → MINIFIG → GEAR
  * Secondary (only after primary is exhausted for the month, and days remain):
- *   BOX, INSTRUCTION, GEAR
+ *   BOX, INSTRUCTION
  */
 "use strict";
 
-const PRIMARY_TYPES = ["SET", "MINIFIG"];
-const SECONDARY_TYPES = ["BOX", "INSTRUCTION", "GEAR"];
+const PRIMARY_TYPES = ["SET", "MINIFIG", "GEAR"];
+const SECONDARY_TYPES = ["BOX", "INSTRUCTION"];
 
 /** Cron / monthly ingest stops after day 28 Moscow — leave a buffer before that. */
 const SECONDARY_LAST_DAY = 27;
@@ -28,6 +28,20 @@ function moscowDayOfMonth(d = new Date()) {
     day: "2-digit",
   });
   return Number(fmt.format(d));
+}
+
+/**
+ * Lower = higher priority. Unknown types sort last.
+ * @param {string} itemType
+ * @param {string[]=} order
+ */
+function typePriorityRank(itemType, order = PRIMARY_TYPES) {
+  const t = String(itemType || "").toUpperCase();
+  const idx = order.indexOf(t);
+  if (idx >= 0) return idx;
+  const sec = SECONDARY_TYPES.indexOf(t);
+  if (sec >= 0) return PRIMARY_TYPES.length + sec;
+  return PRIMARY_TYPES.length + SECONDARY_TYPES.length + 50;
 }
 
 /**
@@ -100,6 +114,7 @@ module.exports = {
   SECONDARY_LAST_DAY,
   parseTypesCsv,
   moscowDayOfMonth,
+  typePriorityRank,
   resolveIngestTypes,
   isPrimaryType,
   isSecondaryType,
