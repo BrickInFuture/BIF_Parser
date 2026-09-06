@@ -195,6 +195,10 @@ function buildAnalysis({ conclusion, catalog, retry, chunkPct, chunkDone, chunkO
   if (conclusion === "cancelled") {
     if (!chunkDone) {
       lines.push("Прогон оборвали до сводки — цифр этого окна нет.");
+    } else if (chunkDone >= 60 || (chunkPct != null && Number(chunkPct) >= SUCCESS_PCT_TARGET)) {
+      lines.push(
+        `Залп успел (${chunkOk}/${chunkDone} с ценами), но задание GitHub оборвали по таймеру на хвосте (сводка/очередь).`
+      );
     } else {
       lines.push(`Прогон оборвали после ${chunkDone} запросов (успели ${chunkOk} с ценами).`);
     }

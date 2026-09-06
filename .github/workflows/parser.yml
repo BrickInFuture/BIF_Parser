@@ -25,7 +25,7 @@ on:
         required: false
         default: "60"
       maxMinutes:
-        description: "Catalog burst max minutes (cool-and-continue needs headroom)"
+        description: "Catalog burst max minutes (cool-and-continue needs headroom under job timeout)"
         required: false
         default: "20"
 
@@ -61,7 +61,8 @@ jobs:
     needs: gate
     if: needs.gate.outputs.go == 'true' && needs.gate.outputs.mode != 'month_end'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # setup (~2) + catalog max 20 (+ cool overrun) + retry 3 + queue 8 + KPI (~3)
+    timeout-minutes: 45
     env:
       DEV_PROJECT_ID: brickinfuture-306f1
       BL_RAW_ONLY: "1"
@@ -125,10 +126,13 @@ jobs:
         run: npm run ingest:catalog -- --confirm --phase=primary --limit="$LIMIT" --maxMinutes="$MAX_MINUTES"
 
       - name: Retry failed observations
+        if: success()
         continue-on-error: true
         run: npm run ingest:retry -- --confirm --phase=primary --limit=10 --maxMinutes=3
 
       - name: User refresh queue
+        if: success()
+        continue-on-error: true
         run: npm run ingest:queue -- --confirm --limit=15 --maxMinutes=8
 
       - name: Coverage KPI
