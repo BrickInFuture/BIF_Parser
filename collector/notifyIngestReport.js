@@ -252,10 +252,13 @@ function buildAnalysis({ conclusion, catalog, retry, chunkPct, chunkDone, chunkO
   return lines;
 }
 
+/** Единый заголовок покрытия во всех Telegram-отчётах (залп / Owl / итог месяца). */
+const COVERAGE_SECTION_TITLE = "Покрытие единое (наборы + минифиги + gear)";
+
 /**
- * Покрытие каталога — ровно две метрики владельца:
+ * Покрытие каталога — одно и то же везде:
  *   1) свежие цены (~28 дней) из SET+MINIFIG+GEAR
- *   2) в целом позиции с любой ценой в базе
+ *   2) в целом позиции с ценой в базе (хотя бы из одного источника)
  */
 function buildCoverageLines(kpi, chunkOk, opts = {}) {
   const lines = [];
@@ -278,8 +281,9 @@ function buildCoverageLines(kpi, chunkOk, opts = {}) {
   const backlog = kpi.errorBacklogPrimary;
   const burstDidNotRun = opts.burstDidNotRun === true;
   const days = Number(kpi.days) > 0 ? Number(kpi.days) : 28;
+  const hideDayPace = opts.hideDayPace === true;
 
-  lines.push(`Покрытие (наборы + минифиги + gear) ${coverMark}`);
+  lines.push(`${COVERAGE_SECTION_TITLE} ${coverMark}`);
   if (burstDidNotRun) {
     lines.push("• залп не писал цены — ниже без изменений с прошлого успешного съёма");
   }
@@ -292,31 +296,35 @@ function buildCoverageLines(kpi, chunkOk, opts = {}) {
     );
   } else {
     lines.push(
-      `• свежие цены: ${n(kpi.freshOkPrimary)} из ${n(kpi.catalogPrimary)}`
+      `• свежие цены (за ${days} дн.): ${n(kpi.freshOkPrimary)} из ${n(kpi.catalogPrimary)}`
     );
   }
 
   if (Number.isFinite(anyOk) && Number.isFinite(catalog) && catalog > 0) {
     lines.push(
-      `• в целом с ценой в базе: ${anyOk} из ${catalog}${
+      `• в целом с ценой в базе (любой источник): ${anyOk} из ${catalog}${
         anyPct != null ? ` (${anyPct}%)` : ""
       }`
     );
   } else {
     lines.push(
-      `• в целом с ценой в базе: ${n(kpi.anyOkPrimary)} из ${n(kpi.catalogPrimary)}`
+      `• в целом с ценой в базе (любой источник): ${n(kpi.anyOkPrimary)} из ${n(
+        kpi.catalogPrimary
+      )}`
     );
   }
 
-  const dayOk = Number(kpi.dayOkWithPrices);
-  const dayTarget =
-    Number(kpi.dayOkTarget) > 0
-      ? Number(kpi.dayOkTarget)
-      : Number(kpi.okPerDayTarget) > 0
-        ? Number(kpi.okPerDayTarget)
-        : 1150;
-  if (Number.isFinite(dayOk) && dayOk >= 0) {
-    lines.push(`• темп дня: ${dayOk} / ${dayTarget} (цель >${dayTarget})`);
+  if (!hideDayPace) {
+    const dayOk = Number(kpi.dayOkWithPrices);
+    const dayTarget =
+      Number(kpi.dayOkTarget) > 0
+        ? Number(kpi.dayOkTarget)
+        : Number(kpi.okPerDayTarget) > 0
+          ? Number(kpi.okPerDayTarget)
+          : 1150;
+    if (Number.isFinite(dayOk) && dayOk >= 0) {
+      lines.push(`• темп дня: ${dayOk} / ${dayTarget} (цель >${dayTarget})`);
+    }
   }
 
   if (backlog != null && backlog !== "" && Number(backlog) > 0) {
@@ -364,6 +372,7 @@ function buildReportText(env = process.env) {
   });
 
   const lines = [
+    "Источник: BrickLink",
     `${circle} Парсер цен — ${statusRu(conclusion)}`,
     when,
     `(${kind})`,
@@ -494,6 +503,7 @@ module.exports = {
   buildCoverageLines,
   formatSecPerOk,
   runKindRu,
+  COVERAGE_SECTION_TITLE,
   COVERAGE_PCT_TARGET,
   SUCCESS_PCT_TARGET,
 };

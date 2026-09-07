@@ -11,10 +11,32 @@ const fs = require("fs");
 const { initFirebaseAdmin } = require("./firebaseAdmin");
 const { utcYearMonth } = require("./gapLedger");
 const { runDocId, patchRun } = require("./checkpoint");
-const { PRIMARY_TYPES } = require("./ingestTypes");
 const { writeIngestArtifact } = require("./ingestReportArtifacts");
 const { observationHasPricedSignal } = require("./marketPoint");
-const { readDayPace, DAY_PACE_TARGET } = require("./collectorGate");
+
+/** Primary для отчёта покрытия: наборы + минифиги + gear (цена из любого источника). */
+const COVERAGE_PRIMARY_TYPES = ["SET", "MINIFIG", "GEAR"];
+const PRICE_SOURCES = ["bricklink", "brickowl"];
+const DAY_PACE_TARGET_DEFAULT = 1150;
+
+async function readDayPaceSafe(db) {
+  try {
+    const { readDayPace, DAY_PACE_TARGET } = require("./collectorGate");
+    const pace = await readDayPace(db);
+    return {
+      utcDay: pace.utcDay,
+      okWithPrices: Number(pace.okWithPrices) || 0,
+      target: Number(pace.target) || DAY_PACE_TARGET || DAY_PACE_TARGET_DEFAULT,
+    };
+  } catch {
+    return { utcDay: null, okWithPrices: 0, target: DAY_PACE_TARGET_DEFAULT };
+  }
+}
+
+function catalogIdFromObsDoc(docId, data) {
+  if (data && data.catalogItemId) return String(data.catalogItemId);
+  return String(docId || "").replace(/__(bricklink|brickowl)$/i, "");
+}
 
 function flagValue(name, fallback = null) {
   const prefix = `--${name}=`;
@@ -75,7 +97,7 @@ async function main() {
       if (snap.empty) break;
       for (const doc of snap.docs) {
         const t = String((doc.data() || {}).itemType || "SET").toUpperCase();
-        if (PRIMARY_TYPES.includes(t)) catalogPrimary += 1;
+        if (COVERAGE_PRIMARY_TYPES.includes(t)) catalogPrimary += 1;
       }
       lastCat = snap.docs[snap.docs.length - 1];
       if (snap.size < 400) break;
@@ -84,76 +106,89 @@ async function main() {
     console.warn("catalog primary count failed:", e.message);
   }
 
-  let freshOk = 0;
-  let freshNoData = 0;
-  let errorBacklog = 0;
-  let freshOkPrimary = 0;
-  let freshNoDataPrimary = 0;
-  let errorBacklogPrimary = 0;
-  /** Разные primary с ценой, снятой в текущем UTC-месяце. */
-  let monthOkPrimary = 0;
-  let monthNoDataPrimary = 0;
-  /** Primary с ценой в базе без ограничения по давности. */
-  let anyOkPrimary = 0;
-  let last = null;
+  const freshOkIds = new Set();
+  const freshNoDataIds = new Set();
+  const errorIds = new Set();
+  const anyOkIds = new Set();
+  const monthOkIds = new Set();
+  const monthNoDataIds = new Set();
   let freshOkCapturedMin = null;
   let freshOkCapturedMax = null;
 
-  for (;;) {
-    let q = db
-      .collection("market_observations")
-      .where("source", "==", "bricklink")
-      .orderBy(admin.firestore.FieldPath.documentId())
-      .limit(400);
-    if (last) q = q.startAfter(last);
-    const snap = await q.get();
-    if (snap.empty) break;
+  for (const source of PRICE_SOURCES) {
+    let last = null;
+    for (;;) {
+      let q = db
+        .collection("market_observations")
+        .where("source", "==", source)
+        .orderBy(admin.firestore.FieldPath.documentId())
+        .limit(400);
+      if (last) q = q.startAfter(last);
+      const snap = await q.get();
+      if (snap.empty) break;
 
-    for (const doc of snap.docs) {
-      const d = doc.data() || {};
-      const st = String(d.status || "");
-      const itemType = String(d.itemType || "SET").toUpperCase();
-      const isPrimary = PRIMARY_TYPES.includes(itemType);
-      const capturedMs = tsToMs(d.capturedAt) || tsToMs(d.updatedAt);
-      const fresh = capturedMs != null && capturedMs >= cutoffMs;
-      const inMonth = capturedMs != null && capturedMs >= monthStartMs;
+      for (const doc of snap.docs) {
+        const d = doc.data() || {};
+        const st = String(d.status || "");
+        const itemType = String(d.itemType || "SET").toUpperCase();
+        if (!COVERAGE_PRIMARY_TYPES.includes(itemType)) continue;
+        const catalogItemId = catalogIdFromObsDoc(doc.id, d);
+        if (!catalogItemId) continue;
 
-      if (st === "error" || st === "fail") {
-        errorBacklog += 1;
-        if (isPrimary) errorBacklogPrimary += 1;
-      }
+        const capturedMs = tsToMs(d.capturedAt) || tsToMs(d.updatedAt);
+        const fresh = capturedMs != null && capturedMs >= cutoffMs;
+        const inMonth = capturedMs != null && capturedMs >= monthStartMs;
+        const priced = observationHasPricedSignal(d);
 
-      if ((st === "ok" || st === "no_data") && fresh) {
-        if (st === "no_data" || d.empty === true) {
-          freshNoData += 1;
-          if (isPrimary) freshNoDataPrimary += 1;
-        } else {
-          freshOk += 1;
-          if (isPrimary) freshOkPrimary += 1;
-          if (capturedMs != null) {
-            if (freshOkCapturedMin == null || capturedMs < freshOkCapturedMin) {
-              freshOkCapturedMin = capturedMs;
-            }
-            if (freshOkCapturedMax == null || capturedMs > freshOkCapturedMax) {
-              freshOkCapturedMax = capturedMs;
+        if (st === "error" || st === "fail") {
+          errorIds.add(catalogItemId);
+        }
+
+        if (priced) {
+          anyOkIds.add(catalogItemId);
+          if (fresh) {
+            freshOkIds.add(catalogItemId);
+            if (capturedMs != null) {
+              if (freshOkCapturedMin == null || capturedMs < freshOkCapturedMin) {
+                freshOkCapturedMin = capturedMs;
+              }
+              if (freshOkCapturedMax == null || capturedMs > freshOkCapturedMax) {
+                freshOkCapturedMax = capturedMs;
+              }
             }
           }
+          if (inMonth) monthOkIds.add(catalogItemId);
+        } else if ((st === "ok" || st === "no_data") && fresh) {
+          if (st === "no_data" || d.empty === true) {
+            freshNoDataIds.add(catalogItemId);
+          }
+        }
+
+        if (inMonth && (st === "no_data" || d.empty === true) && !priced) {
+          monthNoDataIds.add(catalogItemId);
         }
       }
 
-      if (isPrimary && observationHasPricedSignal(d)) {
-        anyOkPrimary += 1;
-      }
-
-      if (isPrimary && inMonth && (st === "ok" || st === "no_data")) {
-        if (st === "no_data" || d.empty === true) monthNoDataPrimary += 1;
-        else monthOkPrimary += 1;
-      }
+      last = snap.docs[snap.docs.length - 1];
+      if (snap.size < 400) break;
     }
-
-    last = snap.docs[snap.docs.length - 1];
-    if (snap.size < 400) break;
   }
+
+  // no_data не затирает цену с другого источника
+  for (const id of anyOkIds) {
+    freshNoDataIds.delete(id);
+    monthNoDataIds.delete(id);
+  }
+
+  const freshOk = freshOkIds.size;
+  const freshNoData = freshNoDataIds.size;
+  const errorBacklog = errorIds.size;
+  const freshOkPrimary = freshOk;
+  const freshNoDataPrimary = freshNoData;
+  const errorBacklogPrimary = errorBacklog;
+  const monthOkPrimary = monthOkIds.size;
+  const monthNoDataPrimary = monthNoDataIds.size;
+  const anyOkPrimary = anyOkIds.size;
 
   const freshCovered = freshOk + freshNoData;
   const staleOrMissing = Math.max(0, catalogTotal - freshCovered);
@@ -189,7 +224,7 @@ async function main() {
       : DAYS;
   const okPerDayFresh =
     freshOk > 0 ? Math.round((freshOk / Math.min(DAYS, freshSpanDays || DAYS)) * 10) / 10 : null;
-  const okPerDayTarget = Math.max(1, Number(process.env.BL_OK_PER_DAY_TARGET) || DAY_PACE_TARGET);
+  const okPerDayTarget = Math.max(1, Number(process.env.BL_OK_PER_DAY_TARGET) || DAY_PACE_TARGET_DEFAULT);
   const pricedPctPrimary =
     catalogPrimary > 0 ? Math.round((freshOkPrimary / catalogPrimary) * 1000) / 10 : null;
   const monthPricedPctPrimary =
@@ -202,13 +237,8 @@ async function main() {
       : null;
   const coverageTargetPct = Math.max(1, Number(process.env.BL_COVERAGE_TARGET_PCT) || 98);
 
-  let dayPace = { utcDay: null, okWithPrices: 0, target: okPerDayTarget };
-  try {
-    dayPace = await readDayPace(db);
-    dayPace.target = okPerDayTarget;
-  } catch (e) {
-    console.warn("readDayPace failed:", e && e.message ? e.message : e);
-  }
+  const dayPace = await readDayPaceSafe(db);
+  dayPace.target = okPerDayTarget;
 
   const prevMonthUnique = Number(run.monthUniqueWithPrices);
   const hadPrevMonthUnique = Number.isFinite(prevMonthUnique) && prevMonthUnique >= 0 && run.kpiUpdatedAt;
@@ -227,7 +257,8 @@ async function main() {
     days: DAYS,
     catalogTotal,
     catalogPrimary,
-    primaryTypes: PRIMARY_TYPES,
+    primaryTypes: COVERAGE_PRIMARY_TYPES,
+    priceSources: PRICE_SOURCES,
     freshOk,
     freshNoData,
     freshCovered,

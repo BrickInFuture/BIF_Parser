@@ -10,7 +10,7 @@ const { readIngestArtifact } = require("./ingestReportArtifacts");
 const {
   formatReportDateRu,
   periodIdRu,
-  coverageCircles,
+  buildCoverageLines,
   COVERAGE_PCT_TARGET,
   SUCCESS_PCT_TARGET,
 } = require("./notifyIngestReport");
@@ -24,52 +24,30 @@ function buildMonthEndText(kpi = {}, env = process.env) {
   const when = formatReportDateRu(new Date());
   const monthNom = periodIdRu(kpi.periodId, "nominative");
   const periodGen = periodIdRu(kpi.periodId, "genitive");
-  const anyOk = Number(kpi.anyOkPrimary);
-  const freshOk = Number(kpi.freshOkPrimary);
   const monthOk = Number(kpi.monthOkPrimary);
   const catalog = Number(kpi.catalogPrimary);
-  const days = Number(kpi.days) > 0 ? Number(kpi.days) : 28;
-  const anyPct =
-    kpi.anyPricedPctPrimary != null && Number.isFinite(Number(kpi.anyPricedPctPrimary))
-      ? Number(kpi.anyPricedPctPrimary)
-      : catalog > 0 && Number.isFinite(anyOk)
-        ? Math.round((anyOk / catalog) * 1000) / 10
-        : null;
-  const freshPct =
-    kpi.pricedPctPrimary != null && Number.isFinite(Number(kpi.pricedPctPrimary))
-      ? Number(kpi.pricedPctPrimary)
-      : catalog > 0 && Number.isFinite(freshOk)
-        ? Math.round((freshOk / catalog) * 1000) / 10
-        : null;
   const monthPct =
     kpi.monthPricedPctPrimary != null && Number.isFinite(Number(kpi.monthPricedPctPrimary))
       ? Number(kpi.monthPricedPctPrimary)
       : catalog > 0 && Number.isFinite(monthOk)
         ? Math.round((monthOk / catalog) * 1000) / 10
         : null;
-  const mark = coverageCircles(freshPct != null ? freshPct : anyPct);
   const trips = Number(kpi.runOkWithPrices != null ? kpi.runOkWithPrices : kpi.runOk);
   const perDay = Number(kpi.okPerDayWithPrices);
   const dayTarget = Number(kpi.okPerDayTarget != null ? kpi.okPerDayTarget : 2000);
   const successPct = kpi.runSuccessPct;
   const runOk = Number(kpi.runOk) || 0;
   const runFail = Number(kpi.runFail) || 0;
-  const backlog = kpi.errorBacklogPrimary;
   const target = Number(kpi.targetCoveragePct != null ? kpi.targetCoveragePct : COVERAGE_PCT_TARGET);
   const hitTarget = monthPct != null && monthPct >= target;
 
   const lines = [
+    "Источник: BrickLink",
     `📊 Итог ${periodGen}`,
     when,
     "(автосбор дней 1–26 закончен)",
     "",
-    `Покрытие (наборы + минифиги) ${mark}`,
-    `• свежие цены (за ${days} дн.): ${n(freshOk)} из ${n(catalog)}${
-      freshPct != null ? ` (${freshPct}%)` : ""
-    }`,
-    `• в целом с ценой в базе: ${n(anyOk)} из ${n(catalog)}${
-      anyPct != null ? ` (${anyPct}%)` : ""
-    }`,
+    ...buildCoverageLines(kpi, 0, { hideDayPace: true }),
     "",
     `За ${monthNom}: с ценой месяца ${n(monthOk)} из ${n(catalog)}${
       monthPct != null ? ` (${monthPct}%)` : ""
@@ -86,9 +64,6 @@ function buildMonthEndText(kpi = {}, env = process.env) {
     lines.push(
       `• удачность запросов: ${successPct}% (ок ${runOk}, мимо ${runFail}; цель >${SUCCESS_PCT_TARGET}%)`
     );
-  }
-  if (backlog != null && backlog !== "" && Number(backlog) > 0) {
-    lines.push(`• осталось в очереди ошибок: ${n(backlog)}`);
   }
 
   lines.push("", "С 1-го числа следующего месяца автосбор снова каждый день.");
