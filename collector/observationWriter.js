@@ -3,7 +3,8 @@
  *
  * Всегда пишет СЫРЬЁ (writeRawObservation.js). Затем оценку BIF:
  *   • BL_RAW_ONLY=1 (публичный прогон) — НЕ считает inline; BIF посчитает
- *     закрытый Firestore-триггер onMarketMonthlyWritten;
+ *     закрытый Firestore-триггер onMarketMonthlyWritten (на родительском
+ *     market_observations/{obsId}, один раз на скрейп);
  *   • иначе (приватный/локальный) — считает сразу через закрытый модуль
  *     functions/bifFromObservation.js (recomputeBifForItem).
  *

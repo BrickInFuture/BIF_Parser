@@ -237,6 +237,13 @@ async function fetchGapQueue(db, admin, opts) {
   const onlyHistoricalGaps = opts.onlyHistoricalGaps === true;
   const nowMs = Date.now();
 
+  // Режим «обход» (sweep): каждый залп продолжает скан каталога с сохранённого
+  // курсора вместо повторного чтения одних и тех же позиций с начала. За сутки
+  // курсор проходит весь каталог; maxScan тогда — бюджет чтений НА ТИП за залп.
+  // Так на хорошо покрытом каталоге поздним числом мы не жжём миллионы чтений.
+  const sweep = !!opts.sweepOut;
+  const startAfterByType = opts.startAfterByType || {};
+
   const candidates = [];
   let scanned = 0;
 
@@ -249,9 +256,12 @@ async function fetchGapQueue(db, admin, opts) {
   }
 
   for (const itemType of types) {
-    let lastId = null;
+    let lastId = sweep ? startAfterByType[itemType] || null : null;
+    let reachedEnd = false;
+    let scannedThisType = 0;
     const wantPool = Math.max(maxTasks * 3, maxTasks);
-    while (candidates.length < wantPool && scanned < maxScan) {
+    const scanBudgetHit = () => (sweep ? scannedThisType >= maxScan : scanned >= maxScan);
+    while (candidates.length < wantPool && !scanBudgetHit()) {
       let q = db
         .collection("catalog_items")
         .where("itemType", "==", itemType)
@@ -259,11 +269,15 @@ async function fetchGapQueue(db, admin, opts) {
         .limit(120);
       if (lastId) q = q.startAfter(lastId);
       const snap = await q.get();
-      if (snap.empty) break;
+      if (snap.empty) {
+        reachedEnd = true;
+        break;
+      }
 
       for (const doc of snap.docs) {
         scanned += 1;
-        if (scanned > maxScan) break;
+        scannedThisType += 1;
+        if (scanBudgetHit()) break;
         if (!shardOk(doc.id)) continue;
         if (excludeIds && excludeIds.has(doc.id)) continue;
 
@@ -328,8 +342,14 @@ async function fetchGapQueue(db, admin, opts) {
       }
 
       lastId = snap.docs[snap.docs.length - 1].id;
-      if (snap.size < 120) break;
+      if (snap.size < 120) {
+        reachedEnd = true;
+        break;
+      }
     }
+    // Курсор обхода: если тип пройден до конца — сбрасываем на начало (следующий
+    // круг), иначе запоминаем позицию, чтобы следующий залп продолжил отсюда.
+    if (sweep) opts.sweepOut.byType[itemType] = reachedEnd ? null : lastId;
   }
 
   candidates.sort((a, b) => {

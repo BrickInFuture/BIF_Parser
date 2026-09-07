@@ -8,7 +8,8 @@
     "ingest:catalog": "node collector/ingestCatalog.js",
     "ingest:retry": "node collector/ingestRetryErrors.js",
     "ingest:queue": "node collector/ingestQueue.js",
-    "ingest:kpi": "node collector/ingestKpi.js"
+    "ingest:kpi": "node collector/ingestKpi.js",
+    "ingest:month-queue": "node collector/monthQueueBuild.js"
   },
   "dependencies": {
     "cheerio": "^1.2.0",

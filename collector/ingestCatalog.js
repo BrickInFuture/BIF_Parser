@@ -65,8 +65,25 @@ const {
   observationAlreadyPriced,
   currentUtcMonthHasPrice,
 } = require("./gapQueue");
+const {
+  ensureMonthQueue,
+  takeFromMonthQueue,
+  takeDueMonthQueueErrors,
+  pushMonthQueueError,
+  clearMonthQueueError,
+  loadCatalogDocsByIds,
+  readMonthQueueMeta,
+  buildMonthQueue,
+} = require("./monthQueue");
 const { writeIngestArtifact } = require("./ingestReportArtifacts");
 const { markCollectorHot, bumpDayPace } = require("./collectorGate");
+const {
+  queueIdFor,
+  readQueueMeta,
+  buildMonthlyQueue,
+  popQueueIds,
+  wrapQueue,
+} = require("./monthlyQueue");
 
 function flagValue(name, fallback = null) {
   const prefix = `--${name}=`;
@@ -101,6 +118,40 @@ const SHARD_INDEX = Math.min(
 const PHASE_FLAG = String(flagValue("phase", "auto") || "auto").toLowerCase();
 const TYPES_CSV = flagValue("types", null);
 const QUEUE_MODE = String(flagValue("queue", "both") || "both").toLowerCase();
+/**
+ * Экономия чтений Firestore на поиске «кого снимать»:
+ *   BL_GAP_SWEEP=1     — обход каталога курсором: залп продолжает скан с прошлой
+ *                        позиции (в run-доке gapSweep), а не читает верхушку заново.
+ *   BL_GAP_MAX_SCAN=N  — бюджет чтений на тип за залп в режиме обхода (по умолчанию
+ *                        1000). За сутки курсор всё равно проходит весь каталог.
+ * Выкл (по умолчанию) — прежнее поведение (скан с начала, maxScan≈25000).
+ */
+const GAP_SWEEP = process.env.BL_GAP_SWEEP === "1";
+const GAP_MAX_SCAN = Math.max(200, Number(process.env.BL_GAP_MAX_SCAN) || 1000);
+/**
+ * Месячная очередь (канон бюджета): один обход каталога → список id;
+ * залп только берёт кусок. Ошибки — отдельно, с отложенным повтором.
+ * Вкл: BL_MONTH_QUEUE=1 (публичный парсер). Выкл → старый gap/sweep.
+ */
+const MONTH_QUEUE = process.env.BL_MONTH_QUEUE === "1";
+const MONTH_QUEUE_ERROR_BUDGET = Math.max(
+  0,
+  Number(process.env.BL_MONTH_QUEUE_ERROR_BUDGET) || 10
+);
+
+/**
+ * Месячная очередь обхода (см. monthlyQueue.js и BIF_parser.md § «Бюджет Firestore»):
+ *   BL_MONTHLY_QUEUE=1 — каталог читаем ОДИН раз в начале месяца, кладём список id
+ *                        по приоритету в price_ingest_queue, а каждый залп только
+ *                        берёт следующий кусок по курсору (2–3 чтения вместо скана
+ *                        20–25 тыс. карточек). Ошибки — отдельно (ingestRetryErrors).
+ *   BL_QUEUE_CHUNK=N   — размер чанка списка (по умолчанию 5000 id на документ).
+ *   --rebuild-queue    — пересобрать очередь принудительно.
+ * Выкл (по умолчанию) — прежнее поведение (gap-очередь / обход курсором).
+ */
+const MONTHLY_QUEUE = process.env.BL_MONTHLY_QUEUE === "1";
+const QUEUE_CHUNK = Math.max(500, Number(process.env.BL_QUEUE_CHUNK) || 5000);
+const REBUILD_QUEUE = hasFlag("rebuild-queue");
 
 async function alreadyOkThisPeriod(db, catalogItemId, periodId, cat) {
   const obsId = observationDocId(catalogItemId, "bricklink");
@@ -250,6 +301,11 @@ async function main() {
   let activeTypes = [...typePlan.types];
   let typeIndex = 0;
   /** Per-type catalog cursors so SET/MINIFIG can interleave without starving either. */
+  // Курсор обхода gap-очереди текущего месяца (см. BL_GAP_SWEEP). Один общий
+  // объект на весь залп: fetchGapQueue читает стартовую позицию и дописывает новую.
+  const gapSweepState = GAP_SWEEP
+    ? { byType: { ...((RESET_RUN ? null : run.data.gapSweep) || {}) } }
+    : null;
   let typeCursors = RESET_RUN ? {} : { ...(run.data.typeCursors || {}) };
   const savedCursorType = RESET_RUN ? null : run.data.cursorType || null;
   if (savedCursorType && !RESET_RUN && run.data.cursorCatalogId && !typeCursors[savedCursorType]) {
@@ -384,6 +440,128 @@ async function main() {
       }
     }
   }
+
+  /** Не потерять id, уже взятые из месячной очереди, если окно бросает их. */
+  async function requeuePendingAsErrors(reason) {
+    if (!MONTH_QUEUE || !CONFIRM || !pendingItems.length) {
+      pendingItems = [];
+      return;
+    }
+    const left = [...pendingItems];
+    pendingItems = [];
+    for (const item of left) {
+      const id = item?.cat?.catalogItemId;
+      if (!id) continue;
+      try {
+        await pushMonthQueueError(db, admin, {
+          periodId,
+          catalogItemId: id,
+          errorTag: "soft_blocked",
+          error: reason || "window_abandon",
+          FieldValue,
+        });
+      } catch (e) {
+        console.warn("requeuePendingAsErrors failed", id, e && e.message ? e.message : e);
+      }
+    }
+    console.log(
+      JSON.stringify({
+        step: "month_queue_requeue_pending",
+        count: left.length,
+        reason: reason || "abandon",
+      })
+    );
+  }
+
+  async function noteMonthQueueFail(catalogItemId, errorTag, error) {
+    if (!MONTH_QUEUE || !CONFIRM || !catalogItemId) return;
+    try {
+      await pushMonthQueueError(db, admin, {
+        periodId,
+        catalogItemId,
+        errorTag,
+        error,
+        FieldValue,
+      });
+    } catch (e) {
+      console.warn("pushMonthQueueError failed", e && e.message ? e.message : e);
+    }
+  }
+
+  /**
+   * Месячная очередь: взять кусок списка + due-ошибки; без обхода каталога.
+   */
+  async function buildMonthQueuePendingItems(wantLimit) {
+    const limit = Math.max(1, Number(wantLimit) || LIMIT);
+    await ensureMonthQueue(db, admin, {
+      periodId,
+      types: activeTypes,
+      mapCatalogDoc,
+      FieldValue,
+      rebuild: false,
+    });
+
+    let meta = await readMonthQueueMeta(db, periodId);
+    const utcDay = new Date().toISOString().slice(0, 10);
+    if (
+      meta &&
+      Number(meta.remaining) === 0 &&
+      String(meta.lastRebuildUtcDay || "") !== utcDay
+    ) {
+      console.log(JSON.stringify({ step: "month_queue_daily_rebuild", periodId, utcDay }));
+      await buildMonthQueue(db, admin, {
+        periodId,
+        types: activeTypes,
+        mapCatalogDoc,
+        FieldValue,
+      });
+      meta = await readMonthQueueMeta(db, periodId);
+    }
+
+    const errBudget = Math.min(MONTH_QUEUE_ERROR_BUDGET, Math.max(0, Math.floor(limit * 0.2)));
+    const mainBudget = Math.max(0, limit - errBudget);
+    const taken = await takeFromMonthQueue(db, admin, {
+      periodId,
+      limit: mainBudget,
+      FieldValue,
+      dryRun: !CONFIRM,
+    });
+    const due = await takeDueMonthQueueErrors(db, admin, {
+      periodId,
+      limit: errBudget,
+      FieldValue,
+      dryRun: !CONFIRM,
+    });
+
+    const ids = [...(due.ids || []), ...(taken.ids || [])];
+    const cats = await loadCatalogDocsByIds(db, ids, mapCatalogDoc);
+    const byId = new Map(cats.map((c) => [c.catalogItemId, c]));
+    const out = [];
+    for (const id of ids) {
+      const cat = byId.get(id);
+      if (!cat) continue;
+      out.push({
+        cat,
+        source: "month_queue",
+        gapKind: due.ids && due.ids.includes(id) ? "error_retry" : "current_month",
+        targetPeriodId: periodId,
+      });
+    }
+
+    console.log(
+      JSON.stringify({
+        step: "month_queue_take",
+        periodId,
+        taken: taken.taken || taken.ids?.length || 0,
+        errorsDue: due.ids?.length || 0,
+        pending: out.length,
+        remaining: taken.remaining,
+        queueTotal: meta?.total ?? null,
+      })
+    );
+    return out;
+  }
+
   // Очередь страницы/дыр снаружи try — прыжок курсора должен уметь её сбросить.
   let pendingItems = [];
   /** После волны «сайт режет» не забиваем окно снова очередью дыр (она отменяла прыжок). */
@@ -417,9 +595,21 @@ async function main() {
    */
   async function jumpCursorPastHotZone(reason) {
     const fromId = cursorCatalogId;
-    pendingItems = [];
+    await requeuePendingAsErrors(reason || "hot_zone");
     // Дыры (популярные «дыры в месяцах») снова бьют в горячий IP — до конца окна только курсор.
     gapPausedAfterHot = true;
+    if (MONTH_QUEUE) {
+      // В режиме месячной очереди не скачем по каталогу — id уже ушли в errors.
+      console.log(
+        JSON.stringify({
+          step: "month_queue_hot_pause",
+          reason: reason || "hot_zone",
+          circuitTrips: session.circuitTrips || 0,
+        })
+      );
+      await saveCheckpoint();
+      return;
+    }
     let pagesJumped = 0;
     let lastId = cursorCatalogId;
     for (let i = 0; i < HOT_ZONE_JUMP_PAGES; i += 1) {
@@ -560,6 +750,7 @@ async function main() {
         primaryExhausted,
         cursorType,
         typeCursors,
+        ...(gapSweepState ? { gapSweep: gapSweepState.byType } : {}),
         cursorItemNumber,
         cursorCatalogId,
         processed,
@@ -682,20 +873,24 @@ async function main() {
         const currentTasks = await fetchGapQueue(db, admin, {
           types: activeTypes,
           maxTasks: curN,
-          maxScan: Math.max(curN * 500, 25000),
+          maxScan: GAP_SWEEP ? GAP_MAX_SCAN : Math.max(curN * 500, 25000),
           currentPeriodId: periodId,
           mapCatalogDoc,
           shardIndex: SHARD_INDEX,
           shardCount: SHARD_COUNT,
           excludeIds: exclude,
           onlyCurrentMonthGap: true,
+          ...(gapSweepState
+            ? { sweepOut: gapSweepState, startAfterByType: gapSweepState.byType }
+            : {}),
         });
         for (const t of currentTasks) exclude.add(t.cat.catalogItemId);
         out.push(...mapGapTasks(currentTasks, "current_month"));
         currentGot = currentTasks.length;
       }
-      // Недобор слота «текущий месяц» → добираем старыми дырами до полного лимита залпа.
-      const histNeed = histN + Math.max(0, curN - currentGot);
+      // Недобор текущего месяца → старыми дырами ТОЛЬКО если budget истории > 0.
+      // Иначе (канон BL_HISTORICAL_GAP_BUDGET=0) не жжём ledger-скан.
+      const histNeed = histN > 0 ? histN + Math.max(0, curN - currentGot) : 0;
       if (histNeed > 0) {
         const histTasks = await fetchGapQueue(db, admin, {
           types: activeTypes,
@@ -720,6 +915,7 @@ async function main() {
     async function padBurstQueueToLimit(items, targetLimit) {
       const target = Math.max(0, Number(targetLimit) || 0);
       if (!CONFIRM || QUEUE_MODE === "cursor" || target <= 0) return items;
+      const histBudget = Number(burstBudgets.historical) || 0;
       const out = [...items];
       const exclude = new Set(out.map((x) => x.cat.catalogItemId));
       for (const id of gapHandled) exclude.add(id);
@@ -729,13 +925,16 @@ async function main() {
         const moreCur = await fetchGapQueue(db, admin, {
           types: activeTypes,
           maxTasks: need,
-          maxScan: Math.max(need * 500, 25000),
+          maxScan: GAP_SWEEP ? GAP_MAX_SCAN : Math.max(need * 500, 25000),
           currentPeriodId: periodId,
           mapCatalogDoc,
           shardIndex: SHARD_INDEX,
           shardCount: SHARD_COUNT,
           excludeIds: exclude,
           onlyCurrentMonthGap: true,
+          ...(gapSweepState
+            ? { sweepOut: gapSweepState, startAfterByType: gapSweepState.byType }
+            : {}),
         });
         for (const t of moreCur) {
           exclude.add(t.cat.catalogItemId);
@@ -744,7 +943,7 @@ async function main() {
         }
       }
 
-      if (out.length < target) {
+      if (out.length < target && histBudget > 0) {
         const need = target - out.length;
         const moreHist = await fetchGapQueue(db, admin, {
           types: activeTypes,
@@ -765,6 +964,7 @@ async function main() {
       }
 
       // Обход каталога по приоритету типов: SET → MINIFIG → GEAR (без чередования).
+      // В режиме месячной очереди сюда не заходим (pad не вызывается).
       let padTypeIndex = 0;
       let padCursorId = null;
       let scanned = 0;
@@ -803,10 +1003,17 @@ async function main() {
     }
 
     const setupStartedMs = Date.now();
-    const [, initialGapItems] = await Promise.all([
-      session.warmUp(),
-      buildGapPendingItems(burstBudgets.current, burstBudgets.historical),
-    ]);
+    let initialGapItems = [];
+    if (MONTH_QUEUE && QUEUE_MODE !== "cursor") {
+      await session.warmUp();
+      initialGapItems = await buildMonthQueuePendingItems(LIMIT);
+    } else {
+      const [, gapItems] = await Promise.all([
+        session.warmUp(),
+        buildGapPendingItems(burstBudgets.current, burstBudgets.historical),
+      ]);
+      initialGapItems = gapItems;
+    }
     try {
       if (session.httpCookieHeader) {
         await saveHttpAuth(db, FieldValue, {
@@ -821,9 +1028,11 @@ async function main() {
     pendingItems =
       QUEUE_MODE === "cursor"
         ? initialGapItems
-        : await padBurstQueueToLimit(initialGapItems, LIMIT);
+        : MONTH_QUEUE
+          ? initialGapItems
+          : await padBurstQueueToLimit(initialGapItems, LIMIT);
     burstQueued = pendingItems.length;
-    if (QUEUE_MODE !== "cursor" && pendingItems.length < LIMIT) {
+    if (QUEUE_MODE !== "cursor" && !MONTH_QUEUE && pendingItems.length < LIMIT) {
       console.log(
         JSON.stringify({
           step: "burst_queue_short",
@@ -930,6 +1139,24 @@ async function main() {
       }
       const remaining = LIMIT - chunkDone;
       if (remaining <= 0 || Date.now() >= deadlineMs) return false;
+
+      if (MONTH_QUEUE) {
+        const refill = await buildMonthQueuePendingItems(remaining);
+        if (!refill.length) return false;
+        pendingItems.push(...refill);
+        gapRefills += 1;
+        console.log(
+          JSON.stringify({
+            step: "month_queue_refill",
+            added: refill.length,
+            pending: pendingItems.length,
+            gapRefills,
+            chunkDone,
+          })
+        );
+        return true;
+      }
+
       const refillBudgets = resolveBurstBudgets(Math.min(remaining, Math.max(gapBudget, 20)));
       const refill = await buildGapPendingItems(
         refillBudgets.current,
@@ -952,12 +1179,12 @@ async function main() {
 
     while (!stopWindow && chunkDone < LIMIT && Date.now() < deadlineMs) {
       if (!pendingItems.length) {
-        if (QUEUE_MODE === "gap") {
+        const refilled = await refillGapQueueIfNeeded();
+        if (refilled) continue;
+        if (QUEUE_MODE === "gap" || MONTH_QUEUE) {
           exhausted = true;
           break;
         }
-        const refilled = await refillGapQueueIfNeeded();
-        if (refilled) continue;
 
         const pageSize = Math.min(50, Math.max(10, LIMIT - chunkDone));
         const page = await fetchCatalogPageByType(
@@ -1189,12 +1416,13 @@ async function main() {
             );
           }
           await saveCheckpoint();
-          if (source === "gap") gapHandled.add(cat.catalogItemId);
+          if (source === "gap" || source === "month_queue") gapHandled.add(cat.catalogItemId);
           if (isSoftBlockTag("exception", lastError)) {
             const cluster = applyClusterAfterSoft(cat);
             if (cluster?.needsCursorJump) await jumpCursorPastHotZone("mixed_soft_exception");
             await noteCollectorHeat("soft_block_exception");
           }
+          await noteMonthQueueFail(cat.catalogItemId, "exception", lastError);
           continue;
         }
 
@@ -1223,7 +1451,8 @@ async function main() {
             );
           }
           await saveCheckpoint();
-          if (source === "gap") gapHandled.add(cat.catalogItemId);
+          if (source === "gap" || source === "month_queue") gapHandled.add(cat.catalogItemId);
+          await noteMonthQueueFail(cat.catalogItemId, scrape.errorTag || "parse_failed", lastError);
           if (isSoftBlockTag(scrape.errorTag, lastError)) {
             const cluster = applyClusterAfterSoft(cat);
             if (cluster?.needsCursorJump) await jumpCursorPastHotZone("mixed_soft_block");
@@ -1252,6 +1481,9 @@ async function main() {
         );
 
         noteClusterOk();
+        if (MONTH_QUEUE && CONFIRM) {
+          await clearMonthQueueError(db, periodId, cat.catalogItemId);
+        }
         const empty = !!scrape.parsed.empty;
         ok += 1;
         let bootstrapTypical = null;
@@ -1344,6 +1576,7 @@ async function main() {
         primaryExhausted,
         cursorType,
         typeCursors,
+        ...(gapSweepState ? { gapSweep: gapSweepState.byType } : {}),
         cursorItemNumber,
         cursorCatalogId,
         processed,

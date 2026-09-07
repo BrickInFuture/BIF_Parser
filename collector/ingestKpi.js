@@ -51,6 +51,78 @@ function hasFlag(name) {
 
 const DAYS = Math.max(1, Number(flagValue("days", "28")) || 28);
 const WRITE_RUN = hasFlag("write-run");
+/**
+ * Дорогой полный KPI сканирует ВЕСЬ каталог + ВСЕ наблюдения (десятки тысяч
+ * чтений Firestore). Раньше он гонялся каждым 30-мин залпом → сотни тысяч
+ * лишних чтений в день. Теперь по умолчанию полный скан — не чаще раза в сутки
+ * (маркер lastFullKpiUtcDay в run-доке), остальные прогоны — лёгкий отчёт из
+ * счётчиков (2 чтения). Форс: --full / INGEST_KPI_FULL=1, --light / INGEST_KPI_LIGHT=1.
+ */
+const FORCE_LIGHT = hasFlag("light") || process.env.INGEST_KPI_LIGHT === "1";
+const FORCE_FULL = hasFlag("full") || process.env.INGEST_KPI_FULL === "1";
+
+function utcDayIso(d = new Date()) {
+  return d.toISOString().slice(0, 10);
+}
+
+/** Лёгкий отчёт без обхода каталога: последние полные цифры из run + живой темп дня. */
+async function runLightKpi(admin, db, FieldValue, periodId) {
+  const runSnap = await db.collection("price_ingest_runs").doc(runDocId(periodId)).get();
+  const run = runSnap.exists ? runSnap.data() || {} : {};
+  const dayPace = await readDayPaceSafe(db);
+  const okPerDayTarget = Math.max(
+    1,
+    Number(process.env.BL_OK_PER_DAY_TARGET) || DAY_PACE_TARGET_DEFAULT
+  );
+  const attempted = (Number(run.ok) || 0) + (Number(run.fail) || 0);
+  const successPct = attempted > 0 ? Math.round((Number(run.ok) / attempted) * 1000) / 10 : null;
+
+  const kpi = {
+    periodId,
+    light: true,
+    lastFullKpiUtcDay: run.lastFullKpiUtcDay || null,
+    catalogPrimary: Number(run.catalogPrimary) || null,
+    monthOkPrimary: Number(run.monthUniqueWithPrices) || Number(run.monthOkPrimary) || null,
+    monthPricedPctPrimary: run.monthPricedPctPrimary ?? null,
+    anyOkPrimary: Number(run.anyOkPrimary) || null,
+    anyPricedPctPrimary: run.anyPricedPctPrimary ?? null,
+    freshOkPrimary: Number(run.freshOkPrimary) || null,
+    pricedPctPrimary: run.pricedPctPrimary ?? null,
+    errorBacklogPrimary: Number(run.errorBacklogPrimary) || 0,
+    dayOkWithPrices: Number(dayPace.okWithPrices) || 0,
+    dayOkUtcDay: dayPace.utcDay || null,
+    dayOkTarget: okPerDayTarget,
+    okPerDayTarget,
+    runOk: Number(run.ok) || 0,
+    runOkWithPrices: Number(run.okWithPrices) || 0,
+    runFail: Number(run.fail) || 0,
+    runNoData: Number(run.noData) || 0,
+    runSuccessPct: successPct,
+    runRetryLeft: Number(run.retryLeft) || 0,
+    circuitTrips: Number(run.circuitTrips) || 0,
+    ingestPhase: run.ingestPhase || null,
+    primaryExhausted: run.primaryExhausted === true,
+    errorTagCounts: run.errorTagCounts || {},
+  };
+
+  console.log(`\n--- collector KPI (light) ---`);
+  console.log(JSON.stringify(kpi, null, 2));
+  writeIngestArtifact("kpi", kpi);
+
+  const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+  if (summaryPath) {
+    const lines = [
+      "",
+      `## Collector ${periodId} KPI (light)`,
+      `- **день, цен снято**: \`${kpi.dayOkWithPrices}\` / цель \`${okPerDayTarget}\``,
+      `- month unique with prices (последний полный скан): \`${kpi.monthOkPrimary ?? "n/a"}\` (${kpi.monthPricedPctPrimary ?? "n/a"}%)`,
+      `- month run success%: \`${successPct ?? "n/a"}\` (ok ${run.ok || 0} / fail ${run.fail || 0})`,
+      `- полный скан покрытия: раз в сутки (посл. \`${run.lastFullKpiUtcDay || "n/a"}\`)`,
+      "",
+    ];
+    fs.appendFileSync(summaryPath, `${lines.join("\n")}\n`, "utf8");
+  }
+}
 
 function tsToMs(v) {
   if (!v) return null;
@@ -75,6 +147,21 @@ function utcMonthStartMs(d = new Date()) {
 async function main() {
   const { admin, db, FieldValue } = initFirebaseAdmin();
   const periodId = utcYearMonth();
+
+  // Полный скан каталога/наблюдений — не чаще раза в сутки. Остальное — лёгкий отчёт.
+  let doLight = FORCE_LIGHT;
+  if (!FORCE_LIGHT && !FORCE_FULL) {
+    try {
+      const preSnap = await db.collection("price_ingest_runs").doc(runDocId(periodId)).get();
+      if (preSnap.exists && String((preSnap.data() || {}).lastFullKpiUtcDay || "") === utcDayIso()) {
+        doLight = true;
+      }
+    } catch {
+      // если не прочитали — сделаем полный скан (безопаснее для отчёта)
+    }
+  }
+  if (doLight) return runLightKpi(admin, db, FieldValue, periodId);
+
   const cutoffMs = Date.now() - DAYS * 24 * 60 * 60 * 1000;
   const monthStartMs = utcMonthStartMs();
 
@@ -341,6 +428,8 @@ async function main() {
         avgSecSoft,
         circuitTrips: Number(run.circuitTrips) || 0,
         kpiUpdatedAt: FieldValue.serverTimestamp(),
+        // Маркер «полный скан за сегодня уже был» — следующие залпы уйдут в light.
+        lastFullKpiUtcDay: utcDayIso(),
       },
       false
     );

@@ -75,7 +75,16 @@ jobs:
       BL_CIRCUIT_COOL_MAX_MS: "240000"
       BL_ADAPTIVE_PAUSE: "0"
       BL_CURRENT_MONTH_BUDGET: "50"
-      BL_HISTORICAL_GAP_BUDGET: "10"
+      # Старые дыры закрываются САМИ при съёме текущего месяца (один HTML = все
+      # месяцы со страницы). Отдельная охота за историей = дорогой скан ledger
+      # каждый залп → выключено ради бюджета Firestore. Догон истории — вручную.
+      BL_HISTORICAL_GAP_BUDGET: "0"
+      # Месячная очередь: один обход каталога → список id; залп только берёт кусок.
+      BL_MONTH_QUEUE: "1"
+      BL_MONTH_QUEUE_ERROR_BUDGET: "10"
+      # Обход каталога курсором — запасной путь, если MONTH_QUEUE выкл.
+      BL_GAP_SWEEP: "1"
+      BL_GAP_MAX_SCAN: "1000"
       BL_HTTP_FETCH: "1"
       BL_HTTP_429_RETRIES: "1"
       BL_HTTP_429_MIN_MS: "15000"
