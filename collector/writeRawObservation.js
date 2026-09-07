@@ -329,7 +329,18 @@ async function writeRawObservationFromParse(db, adminFirestore, payload, opts = 
         { merge: true }
       );
   }
-  await db.collection("market_observations").doc(obsId).set(observation, { merge: true });
+  // Родитель обязателен: закрытый триггер BIF слушает только сводку. Пишем даже если
+  // выше упали бы на следующем шаге — иначе месяцы есть, а оценка в карточке молчит.
+  try {
+    await db.collection("market_observations").doc(obsId).set(observation, { merge: true });
+  } catch (parentErr) {
+    console.error(
+      "writeRawObservation parent set failed after monthly writes",
+      obsId,
+      parentErr && parentErr.message ? parentErr.message : parentErr
+    );
+    throw parentErr;
+  }
 
   return {
     dryRun: false,

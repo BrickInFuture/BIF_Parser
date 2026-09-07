@@ -82,6 +82,7 @@ jobs:
       # Месячная очередь: один обход каталога → список id; залп только берёт кусок.
       BL_MONTH_QUEUE: "1"
       BL_MONTH_QUEUE_ERROR_BUDGET: "10"
+      BL_KPI_FULL_EVERY_DAYS: "3"
       # Обход каталога курсором — запасной путь, если MONTH_QUEUE выкл.
       BL_GAP_SWEEP: "1"
       BL_GAP_MAX_SCAN: "1000"

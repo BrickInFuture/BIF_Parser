@@ -284,6 +284,10 @@ function buildCoverageLines(kpi, chunkOk, opts = {}) {
   const hideDayPace = opts.hideDayPace === true;
 
   lines.push(`${COVERAGE_SECTION_TITLE} ${coverMark}`);
+  if (kpi && kpi.light === true) {
+    const fullDay = kpi.lastFullKpiUtcDay ? String(kpi.lastFullKpiUtcDay) : "n/a";
+    lines.push(`• покрытие на дату полного скана: ${fullDay} (не пересчитывали сейчас)`);
+  }
   if (burstDidNotRun) {
     lines.push("• залп не писал цены — ниже без изменений с прошлого успешного съёма");
   }

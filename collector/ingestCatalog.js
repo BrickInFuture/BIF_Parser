@@ -131,6 +131,8 @@ const MONTH_QUEUE_ERROR_BUDGET = Math.max(
   0,
   Number(process.env.BL_MONTH_QUEUE_ERROR_BUDGET) || 10
 );
+/** Явный бюджет истории; 0 / не задан → historical fetch и pad запрещены. */
+const HISTORICAL_GAP_BUDGET = Math.max(0, Number(process.env.BL_HISTORICAL_GAP_BUDGET) || 0);
 
 /**
  * Месячная очередь обхода (см. monthQueue.js и BIF_parser.md § «Бюджет Firestore»):
@@ -839,6 +841,8 @@ async function main() {
         : QUEUE_MODE === "gap"
           ? { current: LIMIT, historical: 0 }
           : resolveBurstBudgets(LIMIT);
+    if (HISTORICAL_GAP_BUDGET <= 0) burstBudgets.historical = 0;
+    else burstBudgets.historical = Math.min(burstBudgets.historical, HISTORICAL_GAP_BUDGET);
     const gapBudget = burstBudgets.current + burstBudgets.historical;
     pendingItems = [];
     const gapHandled = new Set();
@@ -855,9 +859,12 @@ async function main() {
     }
 
     async function buildGapPendingItems(currentN, historicalN) {
+      if (MONTH_QUEUE) return [];
       if (!CONFIRM || QUEUE_MODE === "cursor") return [];
       const curN = Math.max(0, Number(currentN) || 0);
-      const histN = Math.max(0, Number(historicalN) || 0);
+      // Жёстко: при HISTORICAL_GAP_BUDGET=0 не добираем историю даже если curN недобор.
+      const histN =
+        HISTORICAL_GAP_BUDGET > 0 ? Math.max(0, Number(historicalN) || 0) : 0;
       if (curN <= 0 && histN <= 0) return [];
       const exclude = new Set(gapHandled);
       const out = [];
@@ -881,9 +888,10 @@ async function main() {
         out.push(...mapGapTasks(currentTasks, "current_month"));
         currentGot = currentTasks.length;
       }
-      // Недобор текущего месяца → старыми дырами ТОЛЬКО если budget истории > 0.
-      // Иначе (канон BL_HISTORICAL_GAP_BUDGET=0) не жжём ledger-скан.
-      const histNeed = histN > 0 ? histN + Math.max(0, curN - currentGot) : 0;
+      const histNeed =
+        HISTORICAL_GAP_BUDGET > 0 && histN > 0
+          ? Math.min(HISTORICAL_GAP_BUDGET, histN + Math.max(0, curN - currentGot))
+          : 0;
       if (histNeed > 0) {
         const histTasks = await fetchGapQueue(db, admin, {
           types: activeTypes,
@@ -904,11 +912,13 @@ async function main() {
     /**
      * Если gap-очередь короче LIMIT — добираем наборами без точки за текущий месяц
      * обходом каталога (иначе курсор потом всё SKIP и в отчёте ~10 запросов).
+     * При MONTH_QUEUE или HISTORICAL_GAP_BUDGET=0 pad/history не жжём каталог впустую.
      */
     async function padBurstQueueToLimit(items, targetLimit) {
       const target = Math.max(0, Number(targetLimit) || 0);
+      if (MONTH_QUEUE) return items;
       if (!CONFIRM || QUEUE_MODE === "cursor" || target <= 0) return items;
-      const histBudget = Number(burstBudgets.historical) || 0;
+      const histBudget = HISTORICAL_GAP_BUDGET > 0 ? Number(burstBudgets.historical) || 0 : 0;
       const out = [...items];
       const exclude = new Set(out.map((x) => x.cat.catalogItemId));
       for (const id of gapHandled) exclude.add(id);
@@ -956,8 +966,10 @@ async function main() {
         }
       }
 
-      // Обход каталога по приоритету типов: SET → MINIFIG → GEAR (без чередования).
-      // В режиме месячной очереди сюда не заходим (pad не вызывается).
+      // Pad-обход каталога — только если история разрешена (иначе дорого и бессмысленно
+      // при MONTH_QUEUE / нулевом historical budget).
+      if (HISTORICAL_GAP_BUDGET <= 0) return out.slice(0, target);
+
       let padTypeIndex = 0;
       let padCursorId = null;
       let scanned = 0;
@@ -1051,6 +1063,15 @@ async function main() {
         String(x.gapKind || "").startsWith("current_month")
       ).length;
       const nHist = pendingItems.filter((x) => x.gapKind === "historical").length;
+      if (HISTORICAL_GAP_BUDGET <= 0 && nHist > 0) {
+        console.warn(
+          JSON.stringify({
+            step: "historical_queue_assert_fail",
+            historicalQueued: nHist,
+            historicalBudget: HISTORICAL_GAP_BUDGET,
+          })
+        );
+      }
       console.log(
         JSON.stringify({
           step: "gap_queue_built",
@@ -1062,6 +1083,7 @@ async function main() {
           currentMonthQueued: nCurrent,
           historicalQueued: nHist,
           queueMode: QUEUE_MODE,
+          monthQueue: MONTH_QUEUE,
           periodId,
         })
       );

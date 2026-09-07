@@ -53,16 +53,30 @@ const DAYS = Math.max(1, Number(flagValue("days", "28")) || 28);
 const WRITE_RUN = hasFlag("write-run");
 /**
  * Дорогой полный KPI сканирует ВЕСЬ каталог + ВСЕ наблюдения (десятки тысяч
- * чтений Firestore). Раньше он гонялся каждым 30-мин залпом → сотни тысяч
- * лишних чтений в день. Теперь по умолчанию полный скан — не чаще раза в сутки
- * (маркер lastFullKpiUtcDay в run-доке), остальные прогоны — лёгкий отчёт из
- * счётчиков (2 чтения). Форс: --full / INGEST_KPI_FULL=1, --light / INGEST_KPI_LIGHT=1.
+ * чтений Firestore). Полный скан — не чаще раза в BL_KPI_FULL_EVERY_DAYS UTC-дней
+ * (по умолчанию 3; маркер lastFullKpiUtcDay в run-доке). Остальные прогоны —
+ * лёгкий отчёт из счётчиков. Форс: --full / INGEST_KPI_FULL=1, --light / INGEST_KPI_LIGHT=1.
  */
 const FORCE_LIGHT = hasFlag("light") || process.env.INGEST_KPI_LIGHT === "1";
 const FORCE_FULL = hasFlag("full") || process.env.INGEST_KPI_FULL === "1";
+const KPI_FULL_EVERY_DAYS = Math.max(1, Number(process.env.BL_KPI_FULL_EVERY_DAYS) || 3);
 
 function utcDayIso(d = new Date()) {
   return d.toISOString().slice(0, 10);
+}
+
+/** Сколько целых UTC-дней между YYYY-MM-DD и сейчас (0 = тот же день). */
+function utcDaysSinceIso(iso) {
+  const s = String(iso || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return Infinity;
+  const then = Date.parse(`${s}T00:00:00.000Z`);
+  if (!Number.isFinite(then)) return Infinity;
+  const now = Date.UTC(
+    new Date().getUTCFullYear(),
+    new Date().getUTCMonth(),
+    new Date().getUTCDate()
+  );
+  return Math.max(0, Math.floor((now - then) / (24 * 60 * 60 * 1000)));
 }
 
 /** Лёгкий отчёт без обхода каталога: последние полные цифры из run + живой темп дня. */
@@ -117,7 +131,7 @@ async function runLightKpi(admin, db, FieldValue, periodId) {
       `- **день, цен снято**: \`${kpi.dayOkWithPrices}\` / цель \`${okPerDayTarget}\``,
       `- month unique with prices (последний полный скан): \`${kpi.monthOkPrimary ?? "n/a"}\` (${kpi.monthPricedPctPrimary ?? "n/a"}%)`,
       `- month run success%: \`${successPct ?? "n/a"}\` (ok ${run.ok || 0} / fail ${run.fail || 0})`,
-      `- полный скан покрытия: раз в сутки (посл. \`${run.lastFullKpiUtcDay || "n/a"}\`)`,
+      `- полный скан покрытия: раз в ${KPI_FULL_EVERY_DAYS} дн. (посл. \`${run.lastFullKpiUtcDay || "n/a"}\`)`,
       "",
     ];
     fs.appendFileSync(summaryPath, `${lines.join("\n")}\n`, "utf8");
@@ -148,13 +162,16 @@ async function main() {
   const { admin, db, FieldValue } = initFirebaseAdmin();
   const periodId = utcYearMonth();
 
-  // Полный скан каталога/наблюдений — не чаще раза в сутки. Остальное — лёгкий отчёт.
+  // Полный скан каталога/наблюдений — не чаще раза в BL_KPI_FULL_EVERY_DAYS.
   let doLight = FORCE_LIGHT;
   if (!FORCE_LIGHT && !FORCE_FULL) {
     try {
       const preSnap = await db.collection("price_ingest_runs").doc(runDocId(periodId)).get();
-      if (preSnap.exists && String((preSnap.data() || {}).lastFullKpiUtcDay || "") === utcDayIso()) {
-        doLight = true;
+      if (preSnap.exists) {
+        const lastFull = String((preSnap.data() || {}).lastFullKpiUtcDay || "");
+        if (lastFull && utcDaysSinceIso(lastFull) < KPI_FULL_EVERY_DAYS) {
+          doLight = true;
+        }
       }
     } catch {
       // если не прочитали — сделаем полный скан (безопаснее для отчёта)
