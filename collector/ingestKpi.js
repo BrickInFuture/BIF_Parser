@@ -356,9 +356,12 @@ async function main() {
         (okWithPricesPerDay != null && okWithPricesPerDay >= okPerDayTarget * 0.75)
       : false;
 
+  const fullKpiUtcDay = utcDayIso();
   const kpi = {
     periodId,
     days: DAYS,
+    light: false,
+    lastFullKpiUtcDay: fullKpiUtcDay,
     catalogTotal,
     catalogPrimary,
     primaryTypes: COVERAGE_PRIMARY_TYPES,
@@ -446,7 +449,7 @@ async function main() {
         circuitTrips: Number(run.circuitTrips) || 0,
         kpiUpdatedAt: FieldValue.serverTimestamp(),
         // Маркер «полный скан за сегодня уже был» — следующие залпы уйдут в light.
-        lastFullKpiUtcDay: utcDayIso(),
+        lastFullKpiUtcDay: fullKpiUtcDay,
       },
       false
     );

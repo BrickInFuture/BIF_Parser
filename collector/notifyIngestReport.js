@@ -284,9 +284,15 @@ function buildCoverageLines(kpi, chunkOk, opts = {}) {
   const hideDayPace = opts.hideDayPace === true;
 
   lines.push(`${COVERAGE_SECTION_TITLE} ${coverMark}`);
-  if (kpi && kpi.light === true) {
-    const fullDay = kpi.lastFullKpiUtcDay ? String(kpi.lastFullKpiUtcDay) : "n/a";
-    lines.push(`• покрытие на дату полного скана: ${fullDay} (не пересчитывали сейчас)`);
+  {
+    const kpiDay = kpi.lastFullKpiUtcDay ? String(kpi.lastFullKpiUtcDay) : null;
+    if (kpi.light === true) {
+      lines.push(
+        `• дата обновления KPI: ${kpiDay || "n/a"} (цифры покрытия до следующего полного скана — до 3 дн.)`
+      );
+    } else if (kpiDay) {
+      lines.push(`• дата обновления KPI: ${kpiDay}`);
+    }
   }
   if (burstDidNotRun) {
     lines.push("• залп не писал цены — ниже без изменений с прошлого успешного съёма");
