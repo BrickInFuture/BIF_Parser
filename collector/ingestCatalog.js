@@ -77,13 +77,6 @@ const {
 } = require("./monthQueue");
 const { writeIngestArtifact } = require("./ingestReportArtifacts");
 const { markCollectorHot, bumpDayPace } = require("./collectorGate");
-const {
-  queueIdFor,
-  readQueueMeta,
-  buildMonthlyQueue,
-  popQueueIds,
-  wrapQueue,
-} = require("./monthlyQueue");
 
 function flagValue(name, fallback = null) {
   const prefix = `--${name}=`;
@@ -140,7 +133,7 @@ const MONTH_QUEUE_ERROR_BUDGET = Math.max(
 );
 
 /**
- * Месячная очередь обхода (см. monthlyQueue.js и BIF_parser.md § «Бюджет Firestore»):
+ * Месячная очередь обхода (см. monthQueue.js и BIF_parser.md § «Бюджет Firestore»):
  *   BL_MONTHLY_QUEUE=1 — каталог читаем ОДИН раз в начале месяца, кладём список id
  *                        по приоритету в price_ingest_queue, а каждый залп только
  *                        берёт следующий кусок по курсору (2–3 чтения вместо скана
