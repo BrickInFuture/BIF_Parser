@@ -213,6 +213,28 @@ async function ensureMonthQueue(db, admin, opts = {}) {
   if (!force && meta && String(meta.status) === "ready" && Number(meta.chunkCount) >= 0) {
     return { built: false, meta };
   }
+  // Другой процесс уже собирает (локальный build / параллельный залп) — ждём ready,
+  // не стартуем второй полный обход каталога (дорого и ломает чанки).
+  if (!force && meta && String(meta.status) === "building") {
+    const waitMs = Math.max(30_000, Number(opts.buildWaitMs) || 20 * 60 * 1000);
+    const step = 15_000;
+    const started = Date.now();
+    while (Date.now() - started < waitMs) {
+      await new Promise((r) => setTimeout(r, step));
+      const again = await readMonthQueueMeta(db, periodId);
+      if (again && String(again.status) === "ready") {
+        console.log(
+          JSON.stringify({
+            step: "month_queue_wait_ready",
+            waitedSec: Math.round((Date.now() - started) / 1000),
+            total: again.total,
+          })
+        );
+        return { built: false, meta: again, waited: true };
+      }
+      if (!again || String(again.status) !== "building") break;
+    }
+  }
   const r = await buildMonthQueue(db, admin, opts);
   const fresh = await readMonthQueueMeta(db, periodId);
   return { built: true, meta: fresh, build: r };
