@@ -77,6 +77,10 @@ const {
 } = require("./monthQueue");
 const { writeIngestArtifact } = require("./ingestReportArtifacts");
 const { markCollectorHot, bumpDayPace } = require("./collectorGate");
+const {
+  bumpParserStats,
+  wasUniquePricedThisMonth,
+} = require("./parserStats");
 
 function flagValue(name, fallback = null) {
   const prefix = `--${name}=`;
@@ -129,7 +133,7 @@ const GAP_MAX_SCAN = Math.max(200, Number(process.env.BL_GAP_MAX_SCAN) || 1000);
 const MONTH_QUEUE = process.env.BL_MONTH_QUEUE === "1";
 const MONTH_QUEUE_ERROR_BUDGET = Math.max(
   0,
-  Number(process.env.BL_MONTH_QUEUE_ERROR_BUDGET) || 10
+  Number(process.env.BL_MONTH_QUEUE_ERROR_BUDGET) || 0
 );
 /** Явный бюджет истории; 0 / не задан → historical fetch и pad запрещены. */
 const HISTORICAL_GAP_BUDGET = Math.max(0, Number(process.env.BL_HISTORICAL_GAP_BUDGET) || 0);
@@ -409,6 +413,9 @@ async function main() {
   let chunkDone = 0;
   let chunkOkWithPrices = 0;
   let chunkNoData = 0;
+  let chunkUniquePriced = 0;
+  let chunkSoftBlocked = 0;
+  let chunkFail = 0;
   let gapRefills = 0;
   let burstQueued = 0;
   let lastError = null;
@@ -709,6 +716,7 @@ async function main() {
     const key = tag || "unknown";
     errorTagCounts[key] = (errorTagCounts[key] || 0) + 1;
     chunkErrorTagCounts[key] = (chunkErrorTagCounts[key] || 0) + 1;
+    if (key === "soft_blocked") chunkSoftBlocked += 1;
   }
 
   function noteTiming(scrape) {
@@ -1250,6 +1258,7 @@ async function main() {
         const setNo = cat.itemNumber;
         if (!setNo) {
           fail += 1;
+          chunkFail += 1;
           processed += 1;
           chunkDone += 1;
           lastError = `missing_itemNumber:${cat.catalogItemId}`;
@@ -1412,6 +1421,7 @@ async function main() {
           }
           console.error(`FAIL ${fetchNo}:`, lastError);
           fail += 1;
+          chunkFail += 1;
           processed += 1;
           chunkDone += 1;
           noteErrorTag("exception");
@@ -1447,6 +1457,7 @@ async function main() {
           lastError = scrape.parsed?.error || scrape.waitError || "parse_failed";
           console.error(`FAIL ${fetchNo}:`, lastError);
           fail += 1;
+          chunkFail += 1;
           processed += 1;
           chunkDone += 1;
           noteErrorTag(scrape.errorTag);
@@ -1482,6 +1493,20 @@ async function main() {
           continue;
         }
 
+        // Уникальность «с ценой месяца» — до записи.
+        if (!scrape.parsed.empty && CONFIRM) {
+          try {
+            cat._alreadyPricedThisMonth = await wasUniquePricedThisMonth(
+              db,
+              cat.catalogItemId,
+              "bricklink",
+              periodId
+            );
+          } catch {
+            cat._alreadyPricedThisMonth = false;
+          }
+        }
+
         const write = await writeObservationFromParse(
           db,
           admin.firestore,
@@ -1497,7 +1522,7 @@ async function main() {
 
         noteClusterOk();
         if (MONTH_QUEUE && CONFIRM) {
-          await clearMonthQueueError(db, periodId, cat.catalogItemId);
+          await clearMonthQueueError(db, periodId, cat.catalogItemId, "bricklink");
         }
         const empty = !!scrape.parsed.empty;
         ok += 1;
@@ -1514,6 +1539,17 @@ async function main() {
             rrpOk &&
             (cov.preferBootstrapIfEmpty || cov.cohort === "novelty")
           ) {
+            let alreadyPriced = false;
+            try {
+              alreadyPriced = await wasUniquePricedThisMonth(
+                db,
+                cat.catalogItemId,
+                "bricklink",
+                periodId
+              );
+            } catch {
+              alreadyPriced = false;
+            }
             const boot = await writeRrpBootstrapObservation(
               db,
               admin.firestore,
@@ -1528,13 +1564,17 @@ async function main() {
             );
             if (boot.wrote) {
               bootstrapTypical = boot.bifTypicalNew;
+              noData -= 1;
+              chunkNoData -= 1;
               okWithPrices += 1;
               chunkOkWithPrices += 1;
+              if (!alreadyPriced) chunkUniquePriced += 1;
             }
           }
         } else {
           okWithPrices += 1;
           chunkOkWithPrices += 1;
+          if (!cat._alreadyPricedThisMonth) chunkUniquePriced += 1;
         }
         processed += 1;
         chunkDone += 1;
@@ -1621,6 +1661,18 @@ async function main() {
       } catch (e) {
         console.warn("bumpDayPace failed:", e && e.message ? e.message : e);
       }
+    }
+    try {
+      await bumpParserStats(db, admin.firestore, "bricklink", {
+        requested: chunkDone,
+        gotPrice: chunkOkWithPrices,
+        empty: chunkNoData,
+        errors: chunkFail,
+        softBlocked: chunkSoftBlocked,
+        uniquePriced: chunkUniquePriced,
+      }, { periodId });
+    } catch (e) {
+      console.warn("bumpParserStats failed:", e && e.message ? e.message : e);
     }
     if ((Number(session.circuitTrips) || 0) > 0 || circuitOpenThisWindow) {
       await noteCollectorHeat("window_end_circuit");

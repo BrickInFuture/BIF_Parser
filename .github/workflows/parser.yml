@@ -1,11 +1,6 @@
 # Internal collector — raw market observations only.
-# Needs secret FIREBASE_SERVICE_ACCOUNT_DEV.
-# Optional: TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID, BL_PROXY_URL.
-#
-# Kick-only: Firebase kickBifCollector every 30 min (workflow_dispatch).
-# No on.schedule here — GHA cron duplicated kicks and cancelled in-progress runs.
-# Days 1-26 UTC still enforced in kick + gate.
-# mode=month_end → только KPI + итоговый отчёт за месяц (пинк 26-го ~23:00 UTC).
+# Kick-only: Firebase kickBifCollector every 30 min; kickBifDailyReport 19:59 UTC (23:59 Yerevan).
+# No per-burst Telegram / no full KPI on burst (counters + daily report).
 
 name: BIF collector
 
@@ -13,24 +8,28 @@ on:
   workflow_dispatch:
     inputs:
       reason:
-        description: "schedule = автопинк; owner = вручную (ты / агент)"
+        description: "schedule = автопинк; owner = вручную"
         required: false
         default: "owner"
       mode:
-        description: "burst = обычный залп; month_end = итог месяца после дня 26"
+        description: "burst | build_queues | daily_report | month_end | error_tail"
         required: false
         default: "burst"
       limit:
-        description: "Max items per short burst (SET→MINIFIG→GEAR); stay under IP heat (~60)"
+        description: "BL items per burst"
         required: false
         default: "60"
+      owlLimit:
+        description: "Owl items per burst"
+        required: false
+        default: "20"
       maxMinutes:
-        description: "Catalog burst max minutes (cool-and-continue needs headroom under job timeout)"
+        description: "BL burst max minutes"
         required: false
         default: "20"
 
 concurrency:
-  group: ${{ github.event.inputs.mode == 'month_end' && 'bif-month-end' || 'bif-collector-public' }}
+  group: ${{ github.event.inputs.mode == 'month_end' && 'bif-month-end' || github.event.inputs.mode == 'daily_report' && 'bif-daily-report' || 'bif-collector-public' }}
   cancel-in-progress: false
 
 jobs:
@@ -40,15 +39,15 @@ jobs:
       go: ${{ steps.check.outputs.go }}
       mode: ${{ steps.check.outputs.mode }}
     steps:
-      - name: Days 1-26 UTC for schedule
+      - name: Gate
         id: check
         run: |
           d=$(date -u +%d)
           d=$((10#$d))
           mode="${{ github.event.inputs.mode || 'burst' }}"
-          echo "UTC day=$d event=${{ github.event_name }} mode=$mode"
+          echo "UTC day=$d mode=$mode"
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
-          if [ "$mode" = "month_end" ]; then
+          if [ "$mode" = "month_end" ] || [ "$mode" = "daily_report" ] || [ "$mode" = "build_queues" ]; then
             echo "go=true" >> "$GITHUB_OUTPUT"
           elif [ "$d" -gt 26 ] && [ "${{ github.event.inputs.reason || 'owner' }}" = "schedule" ]; then
             echo "go=false" >> "$GITHUB_OUTPUT"
@@ -57,15 +56,39 @@ jobs:
             echo "go=true" >> "$GITHUB_OUTPUT"
           fi
 
+  build_queues:
+    needs: gate
+    if: needs.gate.outputs.go == 'true' && needs.gate.outputs.mode == 'build_queues'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      DEV_PROJECT_ID: brickinfuture-306f1
+      BL_RAW_ONLY: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm install
+      - name: Write service account
+        env:
+          FIREBASE_SERVICE_ACCOUNT_DEV: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_DEV }}
+        run: |
+          echo "$FIREBASE_SERVICE_ACCOUNT_DEV" > "$RUNNER_TEMP/sa.json"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
+      - name: Build month queues (BL + Owl)
+        run: npm run ingest:month-queue -- --confirm --source=all
+
   ingest:
     needs: gate
-    if: needs.gate.outputs.go == 'true' && needs.gate.outputs.mode != 'month_end'
+    if: needs.gate.outputs.go == 'true' && needs.gate.outputs.mode == 'burst'
     runs-on: ubuntu-latest
-    # setup (~2) + catalog max 20 (+ cool overrun) + retry 3 + queue 8 + KPI (~3)
     timeout-minutes: 45
     env:
       DEV_PROJECT_ID: brickinfuture-306f1
       BL_RAW_ONLY: "1"
+      BO_SKIP_BIF: "1"
       BL_PARSE_TIMEOUT_MS: "90000"
       BL_PAUSE_MS: "800,1600"
       BL_SOFT_BLOCK_FAST_MS: "3000"
@@ -74,129 +97,157 @@ jobs:
       BL_CIRCUIT_COOL_MIN_MS: "120000"
       BL_CIRCUIT_COOL_MAX_MS: "240000"
       BL_ADAPTIVE_PAUSE: "0"
-      BL_CURRENT_MONTH_BUDGET: "50"
-      # Старые дыры закрываются САМИ при съёме текущего месяца (один HTML = все
-      # месяцы со страницы). Отдельная охота за историей = дорогой скан ledger
-      # каждый залп → выключено ради бюджета Firestore. Догон истории — вручную.
+      BL_CURRENT_MONTH_BUDGET: "60"
       BL_HISTORICAL_GAP_BUDGET: "0"
-      # Месячная очередь: один обход каталога → список id; залп только берёт кусок.
       BL_MONTH_QUEUE: "1"
-      BL_MONTH_QUEUE_ERROR_BUDGET: "10"
-      BL_KPI_FULL_EVERY_DAYS: "3"
-      # Обход каталога курсором — запасной путь, если MONTH_QUEUE выкл.
-      BL_GAP_SWEEP: "1"
-      BL_GAP_MAX_SCAN: "1000"
+      BL_MONTH_QUEUE_ERROR_BUDGET: "0"
+      BL_GAP_SWEEP: "0"
       BL_HTTP_FETCH: "1"
       BL_HTTP_429_RETRIES: "1"
       BL_HTTP_429_MIN_MS: "15000"
       BL_HTTP_429_MAX_MS: "30000"
+      BO_PAUSE_MS: "2000,4000"
       BL_PROXY_URL: ${{ secrets.BL_PROXY_URL }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
-
-      - name: Cache Playwright Chromium
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         id: playwright-cache
         with:
           path: ~/.cache/ms-playwright
           key: playwright-chromium-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
-
-      - name: Install deps
-        run: npm install
-
+      - run: npm install
       - name: Install Playwright Chromium
         if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps chromium
-
       - name: Playwright Chromium (from cache)
         if: steps.playwright-cache.outputs.cache-hit == 'true'
         run: npx playwright install chromium
-
       - name: Write service account
         env:
           FIREBASE_SERVICE_ACCOUNT_DEV: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_DEV }}
         run: |
-          if [ -z "$FIREBASE_SERVICE_ACCOUNT_DEV" ]; then
-            echo "Missing secret FIREBASE_SERVICE_ACCOUNT_DEV"; exit 1
-          fi
           echo "$FIREBASE_SERVICE_ACCOUNT_DEV" > "$RUNNER_TEMP/sa.json"
           echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
-
-      - name: Catalog ingest chunk
+      - name: BrickLink burst
         env:
           LIMIT: ${{ github.event.inputs.limit || '60' }}
           MAX_MINUTES: ${{ github.event.inputs.maxMinutes || '20' }}
         run: npm run ingest:catalog -- --confirm --phase=primary --limit="$LIMIT" --maxMinutes="$MAX_MINUTES"
-
-      - name: Retry failed observations
+      - name: Brick Owl burst
         if: success()
         continue-on-error: true
-        run: npm run ingest:retry -- --confirm --phase=primary --limit=10 --maxMinutes=3
-
+        env:
+          BO_LIMIT: ${{ github.event.inputs.owlLimit || '20' }}
+        run: npm run ingest:owl -- --confirm --limit="${{ github.event.inputs.owlLimit || '20' }}" --maxMinutes=12
       - name: User refresh queue
         if: success()
         continue-on-error: true
         run: npm run ingest:queue -- --confirm --limit=15 --maxMinutes=8
 
-      - name: Coverage KPI
-        if: always()
-        run: npm run ingest:kpi -- --days=28 --write-run
+  error_tail:
+    needs: gate
+    if: needs.gate.outputs.go == 'true' && needs.gate.outputs.mode == 'error_tail'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DEV_PROJECT_ID: brickinfuture-306f1
+      BL_RAW_ONLY: "1"
+      BL_MONTH_QUEUE: "1"
+      BL_MONTH_QUEUE_ERROR_BUDGET: "40"
+      BL_ERROR_RETRY_IMMEDIATE: "1"
+      BL_PROXY_URL: ${{ secrets.BL_PROXY_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm install
+      - uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - name: Install Playwright Chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+      - name: Playwright Chromium (from cache)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: npx playwright install chromium
+      - name: Write service account
+        env:
+          FIREBASE_SERVICE_ACCOUNT_DEV: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_DEV }}
+        run: |
+          echo "$FIREBASE_SERVICE_ACCOUNT_DEV" > "$RUNNER_TEMP/sa.json"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
+      - name: Retry month-queue errors (tail)
+        run: npm run ingest:catalog -- --confirm --phase=primary --limit=40 --maxMinutes=25
+      - name: Retry observation errors
+        continue-on-error: true
+        run: npm run ingest:retry -- --confirm --phase=primary --limit=40 --maxMinutes=15
 
-      - name: Notify report
-        if: always()
+  daily_report:
+    needs: gate
+    if: needs.gate.outputs.go == 'true' && needs.gate.outputs.mode == 'daily_report'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DEV_PROJECT_ID: brickinfuture-306f1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm install
+      - name: Write service account
+        env:
+          FIREBASE_SERVICE_ACCOUNT_DEV: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_DEV }}
+        run: |
+          echo "$FIREBASE_SERVICE_ACCOUNT_DEV" > "$RUNNER_TEMP/sa.json"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
+      - name: Daily Telegram report
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          JOB_CONCLUSION: ${{ job.status }}
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
-          BL_RUN_REASON: ${{ github.event.inputs.reason || '' }}
-        run: node collector/notifyIngestReport.js
+        run: npm run notify:daily
 
   month_end:
     needs: gate
     if: needs.gate.outputs.go == 'true' && needs.gate.outputs.mode == 'month_end'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       DEV_PROJECT_ID: brickinfuture-306f1
       BL_RAW_ONLY: "1"
+      BL_MONTH_QUEUE: "1"
+      BL_MONTH_QUEUE_ERROR_BUDGET: "60"
+      BL_ERROR_RETRY_IMMEDIATE: "1"
+      BL_PROXY_URL: ${{ secrets.BL_PROXY_URL }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
-
-      - name: Install deps
-        run: npm install
-
+      - run: npm install
       - name: Write service account
         env:
           FIREBASE_SERVICE_ACCOUNT_DEV: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_DEV }}
         run: |
-          if [ -z "$FIREBASE_SERVICE_ACCOUNT_DEV" ]; then
-            echo "Missing secret FIREBASE_SERVICE_ACCOUNT_DEV"; exit 1
-          fi
           echo "$FIREBASE_SERVICE_ACCOUNT_DEV" > "$RUNNER_TEMP/sa.json"
           echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
-
-      - name: Coverage KPI
-        run: npm run ingest:kpi -- --days=28 --write-run
-
-      - name: Month-end report
+      - name: Error tail before month report
+        continue-on-error: true
+        run: npm run ingest:catalog -- --confirm --phase=primary --limit=60 --maxMinutes=20
+      - name: Daily-style month summary (counters)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: node collector/notifyMonthEndReport.js
+        run: npm run notify:daily

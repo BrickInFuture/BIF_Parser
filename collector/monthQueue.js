@@ -46,15 +46,19 @@ function softRetryMs(errorTag, error) {
 }
 
 /**
- * Нужен ли съём текущего UTC-месяца (1 чтение monthly-дока).
+ * Нужен ли съём monthly-точки (1 чтение).
+ * @param {string} [source] market | brickowl
+ * @param {string} [monthDocId] id monthly-дока (по умолчанию periodId очереди)
  */
-async function needsCurrentMonth(db, catalogItemId, periodId) {
-  const obsId = observationDocId(catalogItemId, "bricklink");
+async function needsCurrentMonth(db, catalogItemId, periodId, source = "bricklink", monthDocId = null) {
+  const src = String(source || "bricklink").toLowerCase() === "brickowl" ? "brickowl" : "bricklink";
+  const monthId = monthDocId || periodId;
+  const obsId = observationDocId(catalogItemId, src);
   const snap = await db
     .collection("market_observations")
     .doc(obsId)
     .collection("monthly")
-    .doc(periodId)
+    .doc(monthId)
     .get();
   if (!snap.exists) return true;
   const d = snap.data() || {};
@@ -71,6 +75,10 @@ async function needsCurrentMonth(db, catalogItemId, periodId) {
 async function buildMonthQueue(db, admin, opts = {}) {
   const FieldValue = opts.FieldValue || admin.firestore.FieldValue;
   const periodId = opts.periodId || utcYearMonth();
+  const source =
+    String(opts.source || "bricklink").toLowerCase() === "brickowl" ? "brickowl" : "bricklink";
+  /** Для Owl пишем lastClosed-месяц — проверка дыры по этому id. */
+  const checkMonthId = opts.checkMonthId || periodId;
   const types = (opts.types || PRIMARY_TYPES).map((t) => String(t).toUpperCase());
   const mapCatalogDoc = opts.mapCatalogDoc;
   if (typeof mapCatalogDoc !== "function") {
@@ -78,13 +86,14 @@ async function buildMonthQueue(db, admin, opts = {}) {
   }
   const dryRun = opts.dryRun === true;
   const nowMs = opts.nowMs != null ? opts.nowMs : Date.now();
-  const ref = queueRef(db, periodId);
+  const ref = queueRef(db, periodId, source);
 
   if (!dryRun) {
     await ref.set(
       {
         periodId,
-        source: "bricklink",
+        source,
+        checkMonthId,
         status: "building",
         updatedAt: FieldValue.serverTimestamp(),
       },
@@ -111,12 +120,13 @@ async function buildMonthQueue(db, admin, opts = {}) {
       for (const doc of snap.docs) {
         scanned += 1;
         const cat = mapCatalogDoc(doc);
-        if (!cat.itemNumber || !cat.supportedBlType || cat.mistypedGear) continue;
+        if (!cat.itemNumber) continue;
+        if (source === "bricklink" && (!cat.supportedBlType || cat.mistypedGear)) continue;
         const classif = classifyCoverage(cat, nowMs);
         if (classif.cohort === "too_early") continue;
 
         needReads += 1;
-        const needs = await needsCurrentMonth(db, doc.id, periodId);
+        const needs = await needsCurrentMonth(db, doc.id, periodId, source, checkMonthId);
         if (!needs) continue;
 
         const coverage = { skip: false, reason: "month_queue_need", cohort: classif.cohort };
@@ -162,7 +172,8 @@ async function buildMonthQueue(db, admin, opts = {}) {
   await ref.set(
     {
       periodId,
-      source: "bricklink",
+      source,
+      checkMonthId,
       status: "ready",
       total: ids.length,
       remaining: ids.length,
@@ -184,6 +195,7 @@ async function buildMonthQueue(db, admin, opts = {}) {
     JSON.stringify({
       step: "month_queue_built",
       periodId,
+      source,
       total: ids.length,
       chunkCount,
       scanned,
@@ -191,14 +203,14 @@ async function buildMonthQueue(db, admin, opts = {}) {
     })
   );
 
-  return { total: ids.length, chunkCount, scanned, needReads };
+  return { total: ids.length, chunkCount, scanned, needReads, source };
 }
 
 /**
  * Есть ли готовая очередь на месяц.
  */
-async function readMonthQueueMeta(db, periodId) {
-  const snap = await queueRef(db, periodId).get();
+async function readMonthQueueMeta(db, periodId, source = "bricklink") {
+  const snap = await queueRef(db, periodId, source).get();
   if (!snap.exists) return null;
   return { id: snap.id, ref: snap.ref, ...(snap.data() || {}) };
 }
@@ -208,8 +220,10 @@ async function readMonthQueueMeta(db, periodId) {
  */
 async function ensureMonthQueue(db, admin, opts = {}) {
   const periodId = opts.periodId || utcYearMonth();
+  const source =
+    String(opts.source || "bricklink").toLowerCase() === "brickowl" ? "brickowl" : "bricklink";
   const force = opts.rebuild === true;
-  const meta = await readMonthQueueMeta(db, periodId);
+  const meta = await readMonthQueueMeta(db, periodId, source);
   if (!force && meta && String(meta.status) === "ready" && Number(meta.chunkCount) >= 0) {
     return { built: false, meta };
   }
@@ -221,11 +235,12 @@ async function ensureMonthQueue(db, admin, opts = {}) {
     const started = Date.now();
     while (Date.now() - started < waitMs) {
       await new Promise((r) => setTimeout(r, step));
-      const again = await readMonthQueueMeta(db, periodId);
+      const again = await readMonthQueueMeta(db, periodId, source);
       if (again && String(again.status) === "ready") {
         console.log(
           JSON.stringify({
             step: "month_queue_wait_ready",
+            source,
             waitedSec: Math.round((Date.now() - started) / 1000),
             total: again.total,
           })
@@ -235,8 +250,8 @@ async function ensureMonthQueue(db, admin, opts = {}) {
       if (!again || String(again.status) !== "building") break;
     }
   }
-  const r = await buildMonthQueue(db, admin, opts);
-  const fresh = await readMonthQueueMeta(db, periodId);
+  const r = await buildMonthQueue(db, admin, { ...opts, source });
+  const fresh = await readMonthQueueMeta(db, periodId, source);
   return { built: true, meta: fresh, build: r };
 }
 
@@ -247,9 +262,11 @@ async function ensureMonthQueue(db, admin, opts = {}) {
 async function takeFromMonthQueue(db, admin, opts = {}) {
   const FieldValue = opts.FieldValue || admin.firestore.FieldValue;
   const periodId = opts.periodId || utcYearMonth();
+  const source =
+    String(opts.source || "bricklink").toLowerCase() === "brickowl" ? "brickowl" : "bricklink";
   const limit = Math.max(1, Number(opts.limit) || 50);
   const dryRun = opts.dryRun === true;
-  const ref = queueRef(db, periodId);
+  const ref = queueRef(db, periodId, source);
 
   return db.runTransaction(async (tx) => {
     const metaSnap = await tx.get(ref);
@@ -313,17 +330,30 @@ async function takeFromMonthQueue(db, admin, opts = {}) {
 
 /**
  * Ошибка съёма → в очередь повтора (не теряем после take).
+ * По умолчанию retryAfterMs далеко в хвост месяца (не каждый залп).
  */
 async function pushMonthQueueError(db, admin, opts = {}) {
   const FieldValue = opts.FieldValue || admin.firestore.FieldValue;
   const periodId = opts.periodId || utcYearMonth();
+  const source =
+    String(opts.source || "bricklink").toLowerCase() === "brickowl" ? "brickowl" : "bricklink";
   const catalogItemId = String(opts.catalogItemId || "");
   if (!catalogItemId) return null;
   const errorTag = opts.errorTag || null;
   const error = opts.error || null;
-  const cool = softRetryMs(errorTag, error);
+  // Хвост месяца: ошибки не мешаем в обычные залпы (retryAfter далеко),
+  // пока BL_ERROR_RETRY_IMMEDIATE=1 не включит старый короткий cool.
+  let cool;
+  if (process.env.BL_ERROR_RETRY_IMMEDIATE === "1" || opts.immediate === true) {
+    cool = softRetryMs(errorTag, error);
+  } else {
+    // ~до 26-го числа UTC текущего месяца + небольшой запас.
+    const now = new Date();
+    const tail = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 26, 12, 0, 0);
+    cool = Math.max(12 * 60 * 60 * 1000, tail - Date.now());
+  }
   const retryAfterMs = Date.now() + cool;
-  const ref = queueRef(db, periodId).collection("errors").doc(catalogItemId);
+  const ref = queueRef(db, periodId, source).collection("errors").doc(catalogItemId);
   await ref.set(
     {
       catalogItemId,
@@ -344,10 +374,12 @@ async function pushMonthQueueError(db, admin, opts = {}) {
 async function takeDueMonthQueueErrors(db, admin, opts = {}) {
   const FieldValue = opts.FieldValue || admin.firestore.FieldValue;
   const periodId = opts.periodId || utcYearMonth();
+  const source =
+    String(opts.source || "bricklink").toLowerCase() === "brickowl" ? "brickowl" : "bricklink";
   const limit = Math.max(1, Number(opts.limit) || 10);
   const nowMs = opts.nowMs != null ? opts.nowMs : Date.now();
   const dryRun = opts.dryRun === true;
-  const col = queueRef(db, periodId).collection("errors");
+  const col = queueRef(db, periodId, source).collection("errors");
 
   // Без составного индекса: берём пачку, фильтруем в памяти.
   const snap = await col.orderBy("retryAfterMs", "asc").limit(Math.max(limit * 3, 30)).get();
@@ -366,7 +398,9 @@ async function takeDueMonthQueueErrors(db, admin, opts = {}) {
   }
 
   if (due.length) {
-    console.log(JSON.stringify({ step: "month_queue_errors_due", count: due.length, periodId }));
+    console.log(
+      JSON.stringify({ step: "month_queue_errors_due", source, count: due.length, periodId })
+    );
   }
   return { ids: due };
 }
@@ -374,10 +408,10 @@ async function takeDueMonthQueueErrors(db, admin, opts = {}) {
 /**
  * Успех → убрать из ошибок (если был).
  */
-async function clearMonthQueueError(db, periodId, catalogItemId) {
+async function clearMonthQueueError(db, periodId, catalogItemId, source = "bricklink") {
   if (!catalogItemId) return;
   try {
-    await queueRef(db, periodId).collection("errors").doc(String(catalogItemId)).delete();
+    await queueRef(db, periodId, source).collection("errors").doc(String(catalogItemId)).delete();
   } catch {
     //
   }
@@ -386,7 +420,9 @@ async function clearMonthQueueError(db, periodId, catalogItemId) {
 /**
  * Загрузить карточки каталога по списку id (N чтений, не обход).
  */
-async function loadCatalogDocsByIds(db, ids, mapCatalogDoc) {
+async function loadCatalogDocsByIds(db, ids, mapCatalogDoc, opts = {}) {
+  const source =
+    String(opts.source || "bricklink").toLowerCase() === "brickowl" ? "brickowl" : "bricklink";
   const out = [];
   const list = (ids || []).filter(Boolean);
   for (let i = 0; i < list.length; i += 100) {
@@ -396,7 +432,8 @@ async function loadCatalogDocsByIds(db, ids, mapCatalogDoc) {
     for (const snap of snaps) {
       if (!snap.exists) continue;
       const cat = mapCatalogDoc(snap);
-      if (!cat.itemNumber || !cat.supportedBlType || cat.mistypedGear) continue;
+      if (!cat.itemNumber) continue;
+      if (source === "bricklink" && (!cat.supportedBlType || cat.mistypedGear)) continue;
       out.push(cat);
     }
   }

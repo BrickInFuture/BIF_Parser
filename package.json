@@ -6,10 +6,12 @@
   "type": "commonjs",
   "scripts": {
     "ingest:catalog": "node collector/ingestCatalog.js",
+    "ingest:owl": "node collector/owl/ingestCatalog.js",
     "ingest:retry": "node collector/ingestRetryErrors.js",
     "ingest:queue": "node collector/ingestQueue.js",
     "ingest:kpi": "node collector/ingestKpi.js",
-    "ingest:month-queue": "node collector/monthQueueBuild.js"
+    "ingest:month-queue": "node collector/monthQueueBuild.js",
+    "notify:daily": "node collector/notifyDailyReport.js"
   },
   "dependencies": {
     "cheerio": "^1.2.0",
