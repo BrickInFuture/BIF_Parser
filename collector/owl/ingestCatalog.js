@@ -1,7 +1,7 @@
 /**
  * Осторожный залп Brick Owl — только из месячной очереди (без скана каталога).
  *
- *   npm run ingest:brickowl:catalog -- --confirm --limit=20 --maxMinutes=15
+ *   npm run ingest:brickowl:catalog -- --confirm --limit=60 --maxMinutes=20
  *
  * Канон: BIF_parser.md — limit≈20, пауза 2–4с, cool при жаре.
  */
@@ -75,10 +75,10 @@ function mapCatalogDocLite(doc) {
 
 const CONFIRM = hasFlag("confirm");
 const DRY_QUEUE = hasFlag("dry-run") || hasFlag("queue-only");
-const LIMIT = Math.max(1, Number(flagValue("limit", process.env.BO_LIMIT || "20")) || 20);
+const LIMIT = Math.max(1, Number(flagValue("limit", process.env.BO_LIMIT || "60")) || 60);
 const MAX_MINUTES = Math.max(
   1,
-  Number(flagValue("maxMinutes", process.env.BO_MAX_MINUTES || "15")) || 15
+  Number(flagValue("maxMinutes", process.env.BO_MAX_MINUTES || "20")) || 20
 );
 const CIRCUIT_FAILS = Math.max(3, Number(process.env.BO_CIRCUIT_FAILS || "5") || 5);
 /** Обычные залпы не мешают ошибки; хвост месяца — отдельно. */

@@ -22,7 +22,7 @@ on:
       owlLimit:
         description: "Owl items per burst"
         required: false
-        default: "20"
+        default: "60"
       maxMinutes:
         description: "BL burst max minutes"
         required: false
@@ -84,7 +84,7 @@ jobs:
     needs: gate
     if: needs.gate.outputs.go == 'true' && needs.gate.outputs.mode == 'burst'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 55
     env:
       DEV_PROJECT_ID: brickinfuture-306f1
       BL_RAW_ONLY: "1"
@@ -141,8 +141,8 @@ jobs:
         if: success()
         continue-on-error: true
         env:
-          BO_LIMIT: ${{ github.event.inputs.owlLimit || '20' }}
-        run: npm run ingest:owl -- --confirm --limit="${{ github.event.inputs.owlLimit || '20' }}" --maxMinutes=12
+          BO_LIMIT: ${{ github.event.inputs.owlLimit || '60' }}
+        run: npm run ingest:owl -- --confirm --limit="${{ github.event.inputs.owlLimit || '60' }}" --maxMinutes=20
       - name: User refresh queue
         if: success()
         continue-on-error: true
