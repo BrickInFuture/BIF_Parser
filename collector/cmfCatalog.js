@@ -108,12 +108,26 @@ function isCompleteOrSealedBox(src = {}) {
  * Random pack NNNN-0 → { SET, NNNN-1 }.
  * Complete / Sealed Box → { skip: true, reason: "skip_no_bl_item" }.
  */
+/** True if value looks like market CMF figure code (col461). */
+function isColMinifigNumber(raw) {
+  return /^col\d+$/i.test(String(raw || "").trim());
+}
+
 function resolveCmfLookup(src = {}) {
   if (!isCmfTheme(src)) return {};
   if (isCmfFigure(src)) {
-    const col = singleMinifigNumber(src);
-    if (col) {
-      return { itemType: "MINIFIG", itemNumber: col, status: "ok" };
+    const fromList = singleMinifigNumber(src);
+    if (fromList && isColMinifigNumber(fromList)) {
+      return { itemType: "MINIFIG", itemNumber: fromList, status: "ok" };
+    }
+    // market Minifigures.txt already uses col### as Number (no MinifigNumbers column).
+    const asItem = itemNumberOf(src);
+    if (isColMinifigNumber(asItem)) {
+      return { itemType: "MINIFIG", itemNumber: asItem, status: "ok" };
+    }
+    const stored = String(src.brickLinkNo || "").trim();
+    if (isColMinifigNumber(stored)) {
+      return { itemType: "MINIFIG", itemNumber: stored, status: "ok" };
     }
     return { skip: true, reason: "missing_col" };
   }
@@ -203,6 +217,7 @@ module.exports = {
   isCmfPackOrCollection,
   parseMinifigNumbers,
   singleMinifigNumber,
+  isColMinifigNumber,
   resolveCmfLookup,
   resolveSourceLookup,
   sourceCatalogFields,

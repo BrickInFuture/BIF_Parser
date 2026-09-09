@@ -18,9 +18,28 @@ function normalizeSetNo(raw) {
   return s.includes("-") ? s : `${s}-1`;
 }
 
+/**
+ * Non-USD viewing currencies market may put in price cells.
+ * Without this, "SEK 483.30" became avgUsd 483.30 (labeled as dollars).
+ */
+const NON_USD_CURRENCY_RE =
+  /\b(?:SEK|EUR|GBP|CAD|AUD|DKK|NOK|CHF|JPY|CNY|PLN|CZK|HUF|MXN|BRL|INR|KRW|TWD|HKD|SGD|NZD|ZAR|TRY|ILS|RUB|UAH|RON|BGN|ISK)\b|(?:^|[^A-Za-z0-9])(?:kr|€|£|¥)(?:$|[^A-Za-z0-9])/i;
+
+/** True if cell text looks like a US dollar amount (US $ / USD / $). */
+function looksLikeUsdMoney(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return false;
+  if (NON_USD_CURRENCY_RE.test(s)) return false;
+  return /(?:US\s*\$|USD\b|\$)/i.test(s);
+}
+
 function parseMoney(raw) {
   if (raw == null) return null;
-  const s = String(raw)
+  const original = String(raw).trim();
+  if (!original) return null;
+  // Reject foreign viewing currency; require a dollar marker so bare "483.30" is not USD.
+  if (!looksLikeUsdMoney(original)) return null;
+  const s = original
     .replace(/US\s*\$/gi, "")
     .replace(/USD/gi, "")
     .replace(/,/g, "")
@@ -72,10 +91,14 @@ function parseStatsBlock(chunk) {
     const m = plain.match(new RegExp(`${label}\\s*:\\s*([\\d,]+)`, "i"));
     return m ? m[1].trim() : null;
   };
-  // Money: "Min Price: US $9.09" | "US$9.09" | "$9.09" | "9.09"
+  // Money: keep currency token so parseMoney can require USD and reject SEK/EUR.
+  // Capture full "US $9.09" / "SEK 483.30", not digits alone (digits-only looked like USD).
   const pickPrice = (label) => {
     const m = plain.match(
-      new RegExp(`${label}\\s*:\\s*(?:US\\s*)?\\$?\\s*([\\d,.]+)`, "i")
+      new RegExp(
+        `${label}\\s*:\\s*((?:US\\s*)?\\$\\s*[\\d,.]+|[A-Z]{3}\\b\\s*[\\d,.]+|[€£¥]\\s*[\\d,.]+|[\\d,.]+\\s*kr\\b)`,
+        "i"
+      )
     );
     return m ? m[1].trim() : null;
   };
@@ -1001,6 +1024,7 @@ function parseCatalogPgHtml(html) {
 module.exports = {
   normalizeSetNo,
   parseMoney,
+  looksLikeUsdMoney,
   parseIntSafe,
   emptyAgg,
   parseStatsBlock,

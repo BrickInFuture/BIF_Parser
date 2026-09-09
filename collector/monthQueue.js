@@ -121,7 +121,7 @@ async function buildMonthQueue(db, admin, opts = {}) {
         scanned += 1;
         const cat = mapCatalogDoc(doc);
         if (!cat.itemNumber) continue;
-        if (source === "bricklink" && (!cat.supportedBlType || cat.mistypedGear)) continue;
+        if (source === "bricklink" && (!cat.supportedBlType || cat.mistypedGear || cat.priceIngestExclude)) continue;
         const classif = classifyCoverage(cat, nowMs);
         if (classif.cohort === "too_early") continue;
 
@@ -433,7 +433,7 @@ async function loadCatalogDocsByIds(db, ids, mapCatalogDoc, opts = {}) {
       if (!snap.exists) continue;
       const cat = mapCatalogDoc(snap);
       if (!cat.itemNumber) continue;
-      if (source === "bricklink" && (!cat.supportedBlType || cat.mistypedGear)) continue;
+      if (source === "bricklink" && (!cat.supportedBlType || cat.mistypedGear || cat.priceIngestExclude)) continue;
       out.push(cat);
     }
   }

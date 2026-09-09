@@ -282,7 +282,7 @@ async function fetchGapQueue(db, admin, opts) {
         if (excludeIds && excludeIds.has(doc.id)) continue;
 
         const cat = mapCatalogDoc(doc);
-        if (!cat.itemNumber || !cat.supportedBlType || cat.mistypedGear) continue;
+        if (!cat.itemNumber || !cat.supportedBlType || cat.mistypedGear || cat.priceIngestExclude) continue;
         if (opts.skipRecentSoftBlock !== false) {
           if (await recentlySoftBlocked(db, doc.id)) continue;
         }

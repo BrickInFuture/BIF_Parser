@@ -18,6 +18,7 @@ const {
   BL_TYPE_PREFIX,
   resolveMarketFetch,
   isMistypedGearAsSet,
+  isPriceIngestExcluded,
 } = require("./blUrls");
 const { PRIMARY_TYPES } = require("./ingestTypes");
 
@@ -57,6 +58,7 @@ function mapCatalogDocBl(doc) {
       normalizeSetNo(d.itemNumber) ||
       String(d.itemNumber || "").trim(),
     mistypedGear: isMistypedGearAsSet(d),
+    priceIngestExclude: isPriceIngestExcluded(d),
     supportedBlType: Boolean(BL_TYPE_PREFIX[fetchType]),
     blFetch,
   };

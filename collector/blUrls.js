@@ -2,11 +2,12 @@
  * Catalog URL helpers (market adapter).
  *
  * Канон Price Guide для BIF: ТОЛЬКО «View older version» =
- *   https://www.market.com/catalogPG.asp?S=75192-1
+ *   https://www.market.com/catalogPG.asp?S=75192-1&vcID=1
  * (ссылка с новой v2-карточки «View older version» ведёт сюда).
  * Новую вкладку v2/catalog/catalogitem.page#T=P НЕ используем —
  * там нет полной помесячной истории в одном HTML.
  *
+ *   vcID=1 — Viewing Currency = USD (иначе BL отдаёт валюту по IP/кукам).
  *   SET  → S=75192-1
  *   GEAR → G=100871
  *   MINIFIG → M=...
@@ -14,6 +15,9 @@
 "use strict";
 
 const { resolveSourceLookup } = require("./catalogFields");
+
+/** market Viewing Currency: 1 = USD */
+const BL_VIEWING_CURRENCY_USD = 1;
 
 const BL_TYPE_PREFIX = {
   SET: "S",
@@ -52,7 +56,7 @@ function marketCatalogPgUrl(itemType, itemNumber) {
   const prefix = BL_TYPE_PREFIX[t] || "S";
   const no = normalizeItemNumber(itemNumber, t);
   if (!no) throw new Error("itemNumber is required");
-  return `https://www.bricklink.com/catalogPG.asp?${prefix}=${encodeURIComponent(no)}`;
+  return `https://www.bricklink.com/catalogPG.asp?${prefix}=${encodeURIComponent(no)}&vcID=${BL_VIEWING_CURRENCY_USD}`;
 }
 
 /** Alias: same URL — explicit name for «View older version only». */
@@ -92,11 +96,31 @@ function isMistypedGearAsSet(catalog = {}) {
   return false;
 }
 
+/**
+ * Catalog rows marked to stay out of primary price ingest (e.g. bulk BL minifig skeleton).
+ * On-demand single refresh may still use them later; monthly queue skips.
+ */
+function isPriceIngestExcluded(catalog = {}) {
+  return catalog.priceIngestExclude === true;
+}
+
+/** Skip reasons shared by catalog/gap/month queues. */
+function shouldSkipCatalogIngest(cat = {}) {
+  if (!cat || !cat.itemNumber) return true;
+  if (!cat.supportedBlType) return true;
+  if (cat.mistypedGear) return true;
+  if (cat.priceIngestExclude) return true;
+  return false;
+}
+
 module.exports = {
   BL_TYPE_PREFIX,
+  BL_VIEWING_CURRENCY_USD,
   normalizeItemNumber,
   marketCatalogPgUrl,
   olderPriceGuideUrl,
   isMistypedGearAsSet,
+  isPriceIngestExcluded,
+  shouldSkipCatalogIngest,
   resolveMarketFetch,
 };
