@@ -289,8 +289,44 @@ async function main() {
   });
 
   if (run.alreadyDone && !RESET_RUN) {
-    console.log(`Run ${run.id} already status=done for ${periodId}. Use --reset-run to restart.`);
-    return;
+    // Пауза из‑за блокировки раньше могла ложно поставить done при ещё полной очереди.
+    // Если в месячной очереди ещё есть id - открываем прогон снова, без --reset-run.
+    let reopenRemaining = null;
+    if (MONTH_QUEUE) {
+      try {
+        const meta = await readMonthQueueMeta(db, periodId, "bricklink");
+        const rem = Number(meta?.remaining);
+        if (Number.isFinite(rem) && rem > 0) reopenRemaining = rem;
+      } catch (e) {
+        console.warn(
+          "readMonthQueueMeta on alreadyDone failed",
+          e && e.message ? e.message : e
+        );
+      }
+    }
+    if (reopenRemaining == null) {
+      console.log(
+        `Run ${run.id} already status=done for ${periodId}. Use --reset-run to restart.`
+      );
+      return;
+    }
+    console.log(
+      JSON.stringify({
+        step: "run_reopen_from_done",
+        runId: run.id,
+        periodId,
+        remaining: reopenRemaining,
+        reason: "month_queue_still_has_ids",
+      })
+    );
+    if (CONFIRM) {
+      await patchRun(run.ref, FieldValue, {
+        status: "running",
+        finishedAt: null,
+        reopenFromDoneAt: FieldValue.serverTimestamp(),
+        reopenFromDoneReason: "month_queue_remaining",
+      });
+    }
   }
 
   let primaryExhausted = RESET_RUN ? false : run.data.primaryExhausted === true;
@@ -1208,6 +1244,39 @@ async function main() {
         const refilled = await refillGapQueueIfNeeded();
         if (refilled) continue;
         if (QUEUE_MODE === "gap" || MONTH_QUEUE) {
+          // Пауза окна (сайт режет) ≠ конец месяца. Иначе done залипает навсегда.
+          if (gapPausedAfterHot || stopWindow) {
+            console.log(
+              JSON.stringify({
+                step: "month_queue_window_pause_not_exhausted",
+                gapPausedAfterHot,
+                stopWindow,
+                chunkDone,
+                reason: "hot_or_stop_window",
+              })
+            );
+            break;
+          }
+          if (MONTH_QUEUE) {
+            let queueRemaining = null;
+            try {
+              const meta = await readMonthQueueMeta(db, periodId, "bricklink");
+              queueRemaining = Number(meta?.remaining);
+            } catch (_) {
+              queueRemaining = null;
+            }
+            if (Number.isFinite(queueRemaining) && queueRemaining > 0) {
+              console.log(
+                JSON.stringify({
+                  step: "month_queue_empty_take_not_exhausted",
+                  remaining: queueRemaining,
+                  chunkDone,
+                  reason: "queue_still_has_ids",
+                })
+              );
+              break;
+            }
+          }
           exhausted = true;
           break;
         }
