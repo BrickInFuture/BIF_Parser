@@ -1,9 +1,9 @@
 /**
  * Осторожный залп Brick Owl — только из месячной очереди (без скана каталога).
  *
- *   npm run ingest:brickowl:catalog -- --confirm --limit=60 --maxMinutes=20
+ *   npm run ingest:brickowl:catalog -- --confirm --limit=12 --maxMinutes=20
  *
- * Канон: BIF_parser.md — limit≈20, пауза 2–4с, cool при жаре.
+ * Канон: BIF_parser.md — limit≈12, пауза 6–12с, cool 3ч при жаре.
  */
 "use strict";
 
@@ -42,10 +42,10 @@ function hasFlag(name) {
 }
 
 function parsePauseMs() {
-  const raw = String(process.env.BO_PAUSE_MS || flagValue("pauseMs", "2000,4000"));
+  const raw = String(process.env.BO_PAUSE_MS || flagValue("pauseMs", "6000,12000"));
   const parts = raw.split(",").map((s) => Number(String(s).trim()));
-  const a = Number.isFinite(parts[0]) ? Math.max(0, parts[0]) : 2000;
-  const b = Number.isFinite(parts[1]) ? Math.max(a, parts[1]) : Math.max(a, 4000);
+  const a = Number.isFinite(parts[0]) ? Math.max(0, parts[0]) : 6000;
+  const b = Number.isFinite(parts[1]) ? Math.max(a, parts[1]) : Math.max(a, 12000);
   return [a, b];
 }
 
@@ -75,12 +75,12 @@ function mapCatalogDocLite(doc) {
 
 const CONFIRM = hasFlag("confirm");
 const DRY_QUEUE = hasFlag("dry-run") || hasFlag("queue-only");
-const LIMIT = Math.max(1, Number(flagValue("limit", process.env.BO_LIMIT || "25")) || 25);
+const LIMIT = Math.max(1, Number(flagValue("limit", process.env.BO_LIMIT || "12")) || 12);
 const MAX_MINUTES = Math.max(
   1,
   Number(flagValue("maxMinutes", process.env.BO_MAX_MINUTES || "20")) || 20
 );
-const CIRCUIT_FAILS = Math.max(3, Number(process.env.BO_CIRCUIT_FAILS || "5") || 5);
+const CIRCUIT_FAILS = Math.max(2, Number(process.env.BO_CIRCUIT_FAILS || "3") || 3);
 /** Обычные залпы не мешают ошибки; хвост месяца — отдельно. */
 const ERROR_BUDGET = Math.max(0, Number(process.env.BO_MONTH_QUEUE_ERROR_BUDGET) || 0);
 

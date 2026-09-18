@@ -9,7 +9,7 @@ const GATE_DOC = "bif_owl_collector_gate";
 
 const HOT_COOL_MS = Math.max(
   60_000,
-  Number(process.env.BO_HOT_UNTIL_MS) || 2 * 60 * 60 * 1000
+  Number(process.env.BO_HOT_UNTIL_MS) || 3 * 60 * 60 * 1000
 );
 
 function gateRef(db) {
