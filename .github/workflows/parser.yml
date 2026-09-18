@@ -1,6 +1,6 @@
 # Internal collector — raw market observations only.
 # Kick-only: Firebase kickBifCollector every 30 min; kickBifDailyReport 19:59 UTC (23:59 Yerevan).
-# No per-burst Telegram / no full KPI on burst (counters + daily report).
+# Default burst = primary source only (secondary does not close current UTC month). No per-burst Telegram.
 
 name: BIF collector
 
@@ -12,9 +12,13 @@ on:
         required: false
         default: "owner"
       mode:
-        description: "burst | build_queues | daily_report | month_end | error_tail"
+        description: "burst | build_queues | rebuild_bl_queue | daily_report | month_end | error_tail"
         required: false
         default: "burst"
+      sources:
+        description: "bl | owl | both (burst only; schedule uses bl)"
+        required: false
+        default: "bl"
       limit:
         description: "BL items per burst"
         required: false
@@ -22,14 +26,14 @@ on:
       owlLimit:
         description: "Owl items per burst"
         required: false
-        default: "60"
+        default: "25"
       maxMinutes:
         description: "BL burst max minutes"
         required: false
         default: "20"
 
 concurrency:
-  group: ${{ github.event.inputs.mode == 'month_end' && 'bif-month-end' || github.event.inputs.mode == 'daily_report' && 'bif-daily-report' || 'bif-collector-public' }}
+  group: ${{ github.event.inputs.mode == 'month_end' && 'bif-month-end' || github.event.inputs.mode == 'daily_report' && 'bif-daily-report' || github.event.inputs.mode == 'rebuild_bl_queue' && 'bif-rebuild-queue' || 'bif-collector-public' }}
   cancel-in-progress: false
 
 jobs:
@@ -38,6 +42,7 @@ jobs:
     outputs:
       go: ${{ steps.check.outputs.go }}
       mode: ${{ steps.check.outputs.mode }}
+      sources: ${{ steps.check.outputs.sources }}
     steps:
       - name: Gate
         id: check
@@ -45,9 +50,11 @@ jobs:
           d=$(date -u +%d)
           d=$((10#$d))
           mode="${{ github.event.inputs.mode || 'burst' }}"
-          echo "UTC day=$d mode=$mode"
+          sources="${{ github.event.inputs.sources || 'bl' }}"
+          echo "UTC day=$d mode=$mode sources=$sources"
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
-          if [ "$mode" = "month_end" ] || [ "$mode" = "daily_report" ] || [ "$mode" = "build_queues" ]; then
+          echo "sources=$sources" >> "$GITHUB_OUTPUT"
+          if [ "$mode" = "month_end" ] || [ "$mode" = "daily_report" ] || [ "$mode" = "build_queues" ] || [ "$mode" = "rebuild_bl_queue" ]; then
             echo "go=true" >> "$GITHUB_OUTPUT"
           elif [ "$d" -gt 26 ] && [ "${{ github.event.inputs.reason || 'owner' }}" = "schedule" ]; then
             echo "go=false" >> "$GITHUB_OUTPUT"
@@ -80,6 +87,30 @@ jobs:
       - name: Build month queues (BL + Owl)
         run: npm run ingest:month-queue -- --confirm --source=all
 
+  rebuild_bl_queue:
+    needs: gate
+    if: needs.gate.outputs.go == 'true' && needs.gate.outputs.mode == 'rebuild_bl_queue'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      DEV_PROJECT_ID: brickinfuture-306f1
+      BL_RAW_ONLY: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm install
+      - name: Write service account
+        env:
+          FIREBASE_SERVICE_ACCOUNT_DEV: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_DEV }}
+        run: |
+          echo "$FIREBASE_SERVICE_ACCOUNT_DEV" > "$RUNNER_TEMP/sa.json"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
+      - name: Rebuild primary month queue (holes only)
+        run: npm run ingest:month-queue -- --confirm --source="bricklink"
+
   ingest:
     needs: gate
     if: needs.gate.outputs.go == 'true' && needs.gate.outputs.mode == 'burst'
@@ -90,7 +121,7 @@ jobs:
       BL_RAW_ONLY: "1"
       BO_SKIP_BIF: "1"
       BL_PARSE_TIMEOUT_MS: "90000"
-      BL_PAUSE_MS: "800,1600"
+      BL_PAUSE_MS: "1000,2000"
       BL_SOFT_BLOCK_FAST_MS: "3000"
       BL_CIRCUIT_SOFT_LIMIT: "5"
       BL_CIRCUIT_STOP: "0"
@@ -106,7 +137,7 @@ jobs:
       BL_HTTP_429_RETRIES: "1"
       BL_HTTP_429_MIN_MS: "15000"
       BL_HTTP_429_MAX_MS: "30000"
-      BO_PAUSE_MS: "2000,4000"
+      BO_PAUSE_MS: "3000,6000"
       BL_PROXY_URL: ${{ secrets.BL_PROXY_URL }}
     steps:
       - uses: actions/checkout@v4
@@ -133,16 +164,17 @@ jobs:
           echo "$FIREBASE_SERVICE_ACCOUNT_DEV" > "$RUNNER_TEMP/sa.json"
           echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
       - name: BrickLink burst
+        if: needs.gate.outputs.sources == 'bl' || needs.gate.outputs.sources == 'both' || needs.gate.outputs.sources == ''
         env:
           LIMIT: ${{ github.event.inputs.limit || '60' }}
           MAX_MINUTES: ${{ github.event.inputs.maxMinutes || '20' }}
         run: npm run ingest:catalog -- --confirm --phase=primary --limit="$LIMIT" --maxMinutes="$MAX_MINUTES"
       - name: Brick Owl burst
-        if: success()
+        if: (needs.gate.outputs.sources == 'owl' || needs.gate.outputs.sources == 'both') && success()
         continue-on-error: true
         env:
-          BO_LIMIT: ${{ github.event.inputs.owlLimit || '60' }}
-        run: npm run ingest:owl -- --confirm --limit="${{ github.event.inputs.owlLimit || '60' }}" --maxMinutes=20
+          BO_LIMIT: ${{ github.event.inputs.owlLimit || '25' }}
+        run: npm run ingest:owl -- --confirm --limit="${{ github.event.inputs.owlLimit || '25' }}" --maxMinutes=20
       - name: User refresh queue
         if: success()
         continue-on-error: true
@@ -159,6 +191,8 @@ jobs:
       BL_MONTH_QUEUE: "1"
       BL_MONTH_QUEUE_ERROR_BUDGET: "40"
       BL_ERROR_RETRY_IMMEDIATE: "1"
+      BL_PAUSE_MS: "1000,2000"
+      BL_HTTP_FETCH: "1"
       BL_PROXY_URL: ${{ secrets.BL_PROXY_URL }}
     steps:
       - uses: actions/checkout@v4

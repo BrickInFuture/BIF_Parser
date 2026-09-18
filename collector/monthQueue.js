@@ -103,6 +103,7 @@ async function buildMonthQueue(db, admin, opts = {}) {
 
   const scored = [];
   let scanned = 0;
+  let eligible = 0;
   let needReads = 0;
 
   for (const itemType of types) {
@@ -124,6 +125,7 @@ async function buildMonthQueue(db, admin, opts = {}) {
         if (source === "bricklink" && (!cat.supportedBlType || cat.mistypedGear || cat.priceIngestExclude)) continue;
         const classif = classifyCoverage(cat, nowMs);
         if (classif.cohort === "too_early") continue;
+        eligible += 1;
 
         needReads += 1;
         const needs = await needsCurrentMonth(db, doc.id, periodId, source, checkMonthId);
@@ -152,7 +154,14 @@ async function buildMonthQueue(db, admin, opts = {}) {
   const ids = scored.map((x) => x.id);
 
   if (dryRun) {
-    return { total: ids.length, chunkCount: Math.ceil(ids.length / CHUNK_SIZE), scanned, needReads, dryRun: true };
+    return {
+      total: ids.length,
+      chunkCount: Math.ceil(ids.length / CHUNK_SIZE),
+      scanned,
+      eligible,
+      needReads,
+      dryRun: true,
+    };
   }
 
   // Снести старые chunks/errors перед записью.
@@ -183,6 +192,7 @@ async function buildMonthQueue(db, admin, opts = {}) {
       cursorChunk: 0,
       cursorIndex: 0,
       scanned,
+      eligible,
       needReads,
       builtAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
@@ -199,11 +209,12 @@ async function buildMonthQueue(db, admin, opts = {}) {
       total: ids.length,
       chunkCount,
       scanned,
+      eligible,
       needReads,
     })
   );
 
-  return { total: ids.length, chunkCount, scanned, needReads, source };
+  return { total: ids.length, chunkCount, scanned, eligible, needReads, source };
 }
 
 /**
@@ -222,8 +233,25 @@ async function ensureMonthQueue(db, admin, opts = {}) {
   const periodId = opts.periodId || utcYearMonth();
   const source =
     String(opts.source || "bricklink").toLowerCase() === "brickowl" ? "brickowl" : "bricklink";
-  const force = opts.rebuild === true;
+  let force = opts.rebuild === true;
   const meta = await readMonthQueueMeta(db, periodId, source);
+  // Застрявший building (>90 мин) — пересобрать, иначе залпы вечно exhausted.
+  if (!force && meta && String(meta.status) === "building") {
+    const updatedMs =
+      meta.updatedAt && typeof meta.updatedAt.toMillis === "function"
+        ? meta.updatedAt.toMillis()
+        : 0;
+    if (updatedMs > 0 && Date.now() - updatedMs > 90 * 60 * 1000) {
+      console.log(
+        JSON.stringify({
+          step: "month_queue_stale_building",
+          source,
+          ageMin: Math.round((Date.now() - updatedMs) / 60000),
+        })
+      );
+      force = true;
+    }
+  }
   if (!force && meta && String(meta.status) === "ready" && Number(meta.chunkCount) >= 0) {
     return { built: false, meta };
   }

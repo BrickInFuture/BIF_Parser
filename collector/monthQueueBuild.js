@@ -115,12 +115,7 @@ async function main() {
 
   console.log(JSON.stringify({ step: "month_queue_build_start", periodId, dryRun, types, sources }));
 
-  if (!dryRun) {
-    const catalogPrimary = await countCatalogPrimary(db, admin);
-    await setCatalogPrimary(db, admin.firestore, catalogPrimary, { periodId });
-    console.log(JSON.stringify({ step: "catalog_primary_set", catalogPrimary }));
-  }
-
+  let blEligible = null;
   for (const source of sources) {
     const checkMonthId = source === "brickowl" ? lastClosedUtcYearMonth() : periodId;
     const mapCatalogDoc = source === "brickowl" ? mapCatalogDocOwl : mapCatalogDocBl;
@@ -133,6 +128,7 @@ async function main() {
       FieldValue,
       dryRun,
     });
+    if (source === "bricklink" && r && r.eligible != null) blEligible = Number(r.eligible) || 0;
     const meta = dryRun ? null : await readMonthQueueMeta(db, periodId, source);
     console.log(
       JSON.stringify({
@@ -143,6 +139,16 @@ async function main() {
         metaStatus: meta?.status || null,
       })
     );
+  }
+
+  if (!dryRun) {
+    // Знаменатель отчёта = позиции, которые реально берём в съём (без exclude / too_early).
+    const catalogPrimary =
+      blEligible != null && blEligible > 0
+        ? blEligible
+        : await countCatalogPrimary(db, admin);
+    await setCatalogPrimary(db, admin.firestore, catalogPrimary, { periodId });
+    console.log(JSON.stringify({ step: "catalog_primary_set", catalogPrimary, fromEligible: blEligible }));
   }
 }
 

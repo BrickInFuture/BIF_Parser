@@ -75,7 +75,7 @@ function mapCatalogDocLite(doc) {
 
 const CONFIRM = hasFlag("confirm");
 const DRY_QUEUE = hasFlag("dry-run") || hasFlag("queue-only");
-const LIMIT = Math.max(1, Number(flagValue("limit", process.env.BO_LIMIT || "60")) || 60);
+const LIMIT = Math.max(1, Number(flagValue("limit", process.env.BO_LIMIT || "25")) || 25);
 const MAX_MINUTES = Math.max(
   1,
   Number(flagValue("maxMinutes", process.env.BO_MAX_MINUTES || "20")) || 20
