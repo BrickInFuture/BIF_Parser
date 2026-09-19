@@ -24,9 +24,9 @@ on:
         required: false
         default: "60"
       owlLimit:
-        description: "Owl items per burst (soft default 12)"
+        description: "Owl items per burst (soft default 20)"
         required: false
-        default: "12"
+        default: "20"
       maxMinutes:
         description: "BL burst max minutes"
         required: false
@@ -199,8 +199,8 @@ jobs:
         if: needs.gate.outputs.sources == 'owl' || needs.gate.outputs.sources == 'both'
         continue-on-error: true
         env:
-          BO_LIMIT: ${{ github.event.inputs.owlLimit || '12' }}
-        run: npm run ingest:owl -- --confirm --limit="${{ github.event.inputs.owlLimit || '12' }}" --maxMinutes=20
+          BO_LIMIT: ${{ github.event.inputs.owlLimit || '20' }}
+        run: npm run ingest:owl -- --confirm --limit="${{ github.event.inputs.owlLimit || '20' }}" --maxMinutes=20
       - name: User refresh queue
         if: success() && (needs.gate.outputs.sources == 'bl' || needs.gate.outputs.sources == 'both' || needs.gate.outputs.sources == '')
         continue-on-error: true
