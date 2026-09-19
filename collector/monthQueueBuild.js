@@ -141,14 +141,11 @@ async function main() {
     );
   }
 
-  if (!dryRun) {
-    // Знаменатель отчёта = позиции, которые реально берём в съём (без exclude / too_early).
-    const catalogPrimary =
-      blEligible != null && blEligible > 0
-        ? blEligible
-        : await countCatalogPrimary(db, admin);
-    await setCatalogPrimary(db, admin.firestore, catalogPrimary, { periodId });
-    console.log(JSON.stringify({ step: "catalog_primary_set", catalogPrimary, fromEligible: blEligible }));
+  if (!dryRun && blEligible != null && blEligible > 0) {
+    // Знаменатель отчёта = позиции market, которые реально берём в съём.
+    // Пересборка только Owl этот знаменатель не трогает (иначе «из 40339» врёт).
+    await setCatalogPrimary(db, admin.firestore, blEligible, { periodId });
+    console.log(JSON.stringify({ step: "catalog_primary_set", catalogPrimary: blEligible }));
   }
 }
 
