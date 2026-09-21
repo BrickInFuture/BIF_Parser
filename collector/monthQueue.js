@@ -17,6 +17,7 @@ const { scoreCatalogPriority, catalogReleaseYear } = require("./catalogPriority"
 const { classifyCoverage } = require("./coveragePolicy");
 const { PRIMARY_TYPES, typePriorityRank } = require("./ingestTypes");
 const { errorLooksLikeSoftBlock } = require("./parseHtml");
+const { isNonCanonicalGearVariant } = require("./blUrls");
 
 const QUEUE_COLL = "price_ingest_queues";
 const CHUNK_SIZE = Math.max(100, Number(process.env.BL_MONTH_QUEUE_CHUNK) || 500);
@@ -122,6 +123,7 @@ async function buildMonthQueue(db, admin, opts = {}) {
         scanned += 1;
         const cat = mapCatalogDoc(doc);
         if (!cat.itemNumber) continue;
+        if (cat.nonCanonicalGear || isNonCanonicalGearVariant(cat)) continue;
         if (source === "bricklink" && (!cat.supportedBlType || cat.mistypedGear || cat.priceIngestExclude)) continue;
         const classif = classifyCoverage(cat, nowMs);
         if (classif.cohort === "too_early") continue;
@@ -461,6 +463,7 @@ async function loadCatalogDocsByIds(db, ids, mapCatalogDoc, opts = {}) {
       if (!snap.exists) continue;
       const cat = mapCatalogDoc(snap);
       if (!cat.itemNumber) continue;
+      if (cat.nonCanonicalGear) continue;
       if (source === "bricklink" && (!cat.supportedBlType || cat.mistypedGear || cat.priceIngestExclude)) continue;
       out.push(cat);
     }

@@ -23,7 +23,11 @@ const {
   wasUniquePricedThisMonth,
 } = require("../parserStats");
 const { setNoFromCatalogItemId } = require("./boUrls");
-const { fetchBrickOwlPriceHistory } = require("./fetchPriceHistory");
+const {
+  fetchBrickOwlPriceHistory,
+  isOwlPermanentMiss,
+  isOwlSoftBlock,
+} = require("./fetchPriceHistory");
 const { writeRawBrickOwlSixMonthAsLastClosed, writeRawBrickOwlError } = require("./writeRawObservation");
 const { writeIngestArtifact } = require("../ingestReportArtifacts");
 const { PRIMARY_TYPES } = require("./gapQueue");
@@ -177,7 +181,8 @@ async function main() {
   let fail = 0;
   let processed = 0;
   let uniquePriced = 0;
-  let consecutiveFails = 0;
+  let softBlocked = 0;
+  let consecutiveSoftFails = 0;
   let circuitTripped = false;
 
   for (const task of tasks) {
@@ -211,6 +216,7 @@ async function main() {
     try {
       fetched = await fetchBrickOwlPriceHistory({
         setNo,
+        itemType: cat.itemType || "SET",
         boid: cachedBoid || undefined,
         owlItemId: cachedOwlItemId || undefined,
       });
@@ -223,9 +229,53 @@ async function main() {
     }
 
     if (!fetched.ok) {
-      fail += 1;
-      consecutiveFails += 1;
+      const tag = fetched.errorTag || "bo_error";
       processed += 1;
+
+      // Нет на Owl — честное пусто, не жара и не хвост ошибок.
+      if (isOwlPermanentMiss(tag)) {
+        noData += 1;
+        consecutiveSoftFails = 0;
+        try {
+          await writeRawBrickOwlSixMonthAsLastClosed(
+            db,
+            admin.firestore,
+            {
+              catalogItemId,
+              itemType: cat.itemType || "SET",
+              setNo,
+              soldNew: null,
+              soldUsed: null,
+              empty: true,
+              method: fetched.method || "ajax_price_history_6m",
+              errorTag: tag,
+              boid: cachedBoid || null,
+              owlItemId: cachedOwlItemId || null,
+              periodId: writePeriodId,
+            },
+            { dryRun: false }
+          );
+        } catch (e) {
+          console.warn("owl miss write failed", catalogItemId, e && e.message ? e.message : e);
+        }
+        try {
+          await clearMonthQueueError(db, queuePeriodId, catalogItemId, "brickowl");
+        } catch {
+          //
+        }
+        console.log(
+          JSON.stringify({
+            step: "owl_no_match",
+            catalogItemId,
+            errorTag: tag,
+            hops: fetched.hops,
+          })
+        );
+        await sleep(randPause(pauseRange));
+        continue;
+      }
+
+      fail += 1;
       try {
         await writeRawBrickOwlError(
           db,
@@ -234,7 +284,7 @@ async function main() {
             catalogItemId,
             itemType: cat.itemType || "SET",
             setNo,
-            errorTag: fetched.errorTag || "bo_error",
+            errorTag: tag,
             method: fetched.method || "ajax_price_history_6m",
             boid: cachedBoid || null,
             owlItemId: cachedOwlItemId || null,
@@ -250,7 +300,7 @@ async function main() {
           periodId: queuePeriodId,
           source: "brickowl",
           catalogItemId,
-          errorTag: fetched.errorTag || "bo_error",
+          errorTag: tag,
           error: fetched.error,
           FieldValue,
         });
@@ -261,20 +311,27 @@ async function main() {
         JSON.stringify({
           step: "owl_fail",
           catalogItemId,
-          errorTag: fetched.errorTag,
+          errorTag: tag,
           hops: fetched.hops,
         })
       );
-      if (consecutiveFails >= CIRCUIT_FAILS) {
-        circuitTripped = true;
-        await markOwlCollectorHot(db, admin.firestore, fetched.errorTag || "owl_circuit");
-        console.log(JSON.stringify({ step: "owl_circuit", consecutiveFails }));
+
+      if (isOwlSoftBlock(tag)) {
+        softBlocked += 1;
+        consecutiveSoftFails += 1;
+        if (consecutiveSoftFails >= CIRCUIT_FAILS) {
+          circuitTripped = true;
+          await markOwlCollectorHot(db, admin.firestore, tag);
+          console.log(JSON.stringify({ step: "owl_circuit", consecutiveSoftFails, errorTag: tag }));
+        }
+      } else {
+        consecutiveSoftFails = 0;
       }
       await sleep(randPause(pauseRange));
       continue;
     }
 
-    consecutiveFails = 0;
+    consecutiveSoftFails = 0;
     let alreadyPriced = false;
     if (!fetched.empty) {
       try {
@@ -343,7 +400,7 @@ async function main() {
         gotPrice: ok,
         empty: noData,
         errors: fail,
-        softBlocked: circuitTripped ? consecutiveFails : 0,
+        softBlocked,
         uniquePriced,
       },
       { periodId: queuePeriodId }
@@ -362,6 +419,7 @@ async function main() {
     ok,
     noData,
     fail,
+    softBlocked,
     uniquePriced,
     elapsedSec,
     circuitTripped,

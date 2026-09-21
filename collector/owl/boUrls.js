@@ -1,11 +1,20 @@
 /**
- * URL Brick Owl: поиск набора → карточка / boid.
+ * URL Brick Owl: поиск → карточка / boid.
+ * cat: 3 = SET, 2 = MINIFIG, 4 = GEAR (иначе jump не находит).
  */
 "use strict";
 
-function brickOwlSearchSetUrl(setNo) {
+function brickOwlSearchCat(itemType) {
+  const t = String(itemType || "SET").toUpperCase();
+  if (t === "MINIFIG") return 2;
+  if (t === "GEAR") return 4;
+  return 3;
+}
+
+function brickOwlSearchSetUrl(setNo, itemType = "SET") {
   const q = encodeURIComponent(String(setNo || "").trim());
-  return `https://www.brickowl.com/search/catalog?query=${q}&jump=1&cat=3`;
+  const cat = brickOwlSearchCat(itemType);
+  return `https://www.brickowl.com/search/catalog?query=${q}&jump=1&cat=${cat}`;
 }
 
 function brickOwlBoidUrl(boid) {
@@ -20,6 +29,7 @@ function setNoFromCatalogItemId(catalogItemId) {
 }
 
 module.exports = {
+  brickOwlSearchCat,
   brickOwlSearchSetUrl,
   brickOwlBoidUrl,
   setNoFromCatalogItemId,

@@ -18,6 +18,7 @@ const {
   BL_TYPE_PREFIX,
   resolveMarketFetch,
   isMistypedGearAsSet,
+  isNonCanonicalGearVariant,
   isPriceIngestExcluded,
 } = require("./blUrls");
 const { PRIMARY_TYPES } = require("./ingestTypes");
@@ -58,6 +59,11 @@ function mapCatalogDocBl(doc) {
       normalizeSetNo(d.itemNumber) ||
       String(d.itemNumber || "").trim(),
     mistypedGear: isMistypedGearAsSet(d),
+    nonCanonicalGear: isNonCanonicalGearVariant({
+      itemType,
+      catalogItemId: doc.id,
+      itemNumber: d.itemNumber,
+    }),
     priceIngestExclude: isPriceIngestExcluded(d),
     supportedBlType: Boolean(BL_TYPE_PREFIX[fetchType]),
     blFetch,
@@ -76,6 +82,11 @@ function mapCatalogDocOwl(doc) {
     yearReleased: d.yearReleased ?? d.year ?? null,
     launchDateMs: d.launchDateMs ?? null,
     catalogSortLaunch: d.catalogSortLaunch ?? null,
+    nonCanonicalGear: isNonCanonicalGearVariant({
+      itemType,
+      catalogItemId: doc.id,
+      itemNumber: d.itemNumber,
+    }),
   };
 }
 

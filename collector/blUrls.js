@@ -97,6 +97,23 @@ function isMistypedGearAsSet(catalog = {}) {
 }
 
 /**
+ * GEAR канон: без суффикса -N (`GEAR_100871`, не `GEAR_100871-1`).
+ * Документы с `-1` - дубли импорта; на market тот же `G=номер`,
+ * очередь гоняла оба → двойной запрос и ложный soft-block circuit.
+ * Смотрим catalogItemId: mapCatalogDoc уже нормализует itemNumber в bare.
+ */
+function isNonCanonicalGearVariant(catalog = {}) {
+  const type = String(catalog.itemType || "").toUpperCase();
+  if (type !== "GEAR") return false;
+  const id = String(catalog.catalogItemId || "").trim();
+  if (id && /^GEAR_.+-\d+$/i.test(id)) return true;
+  const raw = String(catalog.itemNumber || "").trim();
+  // До нормализации / без id: 100871-1
+  if (!id && /^\d+-\d+$/i.test(raw)) return true;
+  return false;
+}
+
+/**
  * Catalog rows marked to stay out of primary price ingest (e.g. bulk BL minifig skeleton).
  * On-demand single refresh may still use them later; monthly queue skips.
  */
@@ -109,6 +126,8 @@ function shouldSkipCatalogIngest(cat = {}) {
   if (!cat || !cat.itemNumber) return true;
   if (!cat.supportedBlType) return true;
   if (cat.mistypedGear) return true;
+  if (cat.nonCanonicalGear) return true;
+  if (isNonCanonicalGearVariant(cat)) return true;
   if (cat.priceIngestExclude) return true;
   return false;
 }
@@ -120,6 +139,7 @@ module.exports = {
   marketCatalogPgUrl,
   olderPriceGuideUrl,
   isMistypedGearAsSet,
+  isNonCanonicalGearVariant,
   isPriceIngestExcluded,
   shouldSkipCatalogIngest,
   resolveMarketFetch,

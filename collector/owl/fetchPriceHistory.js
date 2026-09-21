@@ -12,6 +12,25 @@
 const { brickOwlSearchSetUrl, brickOwlBoidUrl } = require("./boUrls");
 const { parseBrickOwlPriceHistoryHtml, sixMonthSoldFromParse } = require("./parsePriceHistoryHtml");
 
+/** Навсегда нет на Owl — не жара IP, пишем no_data. */
+function isOwlPermanentMiss(errorTag) {
+  const t = String(errorTag || "").toLowerCase();
+  return (
+    t === "bo_no_catalog_item_id" ||
+    t === "bo_no_id" ||
+    t === "bo_search_no_match"
+  );
+}
+
+/** Режет частоту / WAF — можно глушить залп. */
+function isOwlSoftBlock(errorTag) {
+  const t = String(errorTag || "").toLowerCase();
+  if (/429|403|503|soft.?block|waf|rate.?limit/.test(t)) return true;
+  if (/^bo_http_(429|403|503)$/.test(t)) return true;
+  if (/^bo_ajax_http_(429|403|503)$/.test(t)) return true;
+  return false;
+}
+
 const DEFAULT_UA =
   process.env.BO_USER_AGENT ||
   "BrickInFuture-parser/1.0 (+https://brickinfuture.com; price-history research)";
@@ -54,6 +73,43 @@ function extractSetNumberFromPage(html) {
   return row ? row[1] : null;
 }
 
+/**
+ * Если jump не сработал и остались на поиске — взять /catalog/… только с номером в URL.
+ */
+function pickCatalogPathFromSearch(html, setNo) {
+  const needle = String(setNo || "")
+    .trim()
+    .toLowerCase();
+  if (!needle) return null;
+  const base = needle.replace(/-\d+$/, ""); // 75192-1 → 75192
+  const re = /href="(\/catalog\/[^"#?]+)"/gi;
+  const paths = [];
+  let m;
+  while ((m = re.exec(String(html || "")))) {
+    const p = m[1];
+    if (/\/catalog\/(lego-sets|lego-minifigures|lego-gear|themes|edit)\/?$/i.test(p)) continue;
+    if (/\/catalog\/(lego-sets|lego-minifigures|lego-gear)\//i.test(p) && !/-set-|-minifigure|key-chain|gear/i.test(p)) {
+      continue;
+    }
+    paths.push(p);
+  }
+  if (!paths.length) return null;
+  const scored = [];
+  for (const p of paths) {
+    const low = p.toLowerCase();
+    // Номер обязан быть в пути — иначе чужая карточка.
+    const hasExact = low.includes(needle) || (base && new RegExp(`(?:^|[^0-9])${base}(?:[^0-9]|$)`).test(low));
+    if (!hasExact) continue;
+    let score = 50;
+    if (low.includes(needle)) score += 50;
+    if (/-set-|minifigure|key-chain/.test(low)) score += 10;
+    scored.push({ p, score });
+  }
+  if (!scored.length) return null;
+  scored.sort((a, b) => b.score - a.score || a.p.localeCompare(b.p));
+  return scored[0].p;
+}
+
 function htmlFromAjaxPriceCommands(raw) {
   let cmds;
   try {
@@ -90,11 +146,12 @@ async function fetchAjaxPriceTable(owlItemId, referer) {
 }
 
 /**
- * @param {{ setNo?: string, boid?: string, owlItemId?: string|number }} input
+ * @param {{ setNo?: string, boid?: string, owlItemId?: string|number, itemType?: string }} input
  */
 async function fetchBrickOwlPriceHistory(input = {}) {
   const boidIn = input.boid ? String(input.boid).trim() : "";
   const setNo = input.setNo ? String(input.setNo).trim() : "";
+  const itemType = String(input.itemType || "SET").toUpperCase();
   let owlItemId = input.owlItemId != null && String(input.owlItemId).trim()
     ? String(input.owlItemId).trim()
     : "";
@@ -106,7 +163,7 @@ async function fetchBrickOwlPriceHistory(input = {}) {
     if (!boidIn && !setNo) {
       return { ok: false, errorTag: "bo_no_id", method: "ajax_price_history_6m", hops: 0 };
     }
-    pageUrl = boidIn ? brickOwlBoidUrl(boidIn) : brickOwlSearchSetUrl(setNo);
+    pageUrl = boidIn ? brickOwlBoidUrl(boidIn) : brickOwlSearchSetUrl(setNo, itemType);
     const page = await fetchText(pageUrl);
     hops += 1;
     if (!page.ok) {
@@ -121,12 +178,29 @@ async function fetchBrickOwlPriceHistory(input = {}) {
     }
     pageUrl = page.url;
     pageHtml = page.text;
-    const settings = extractSettingsJson(pageHtml);
+    let settings = extractSettingsJson(pageHtml);
     owlItemId = settings?.catalog?.item_id ? String(settings.catalog.item_id) : "";
+
+    // jump не сработал — остались на поиске; попробуем лучший /catalog/…
+    if (!owlItemId && /\/search\//i.test(String(pageUrl))) {
+      const path = pickCatalogPathFromSearch(pageHtml, setNo);
+      if (path) {
+        const follow = await fetchText(`https://www.brickowl.com${path}`);
+        hops += 1;
+        if (follow.ok) {
+          pageUrl = follow.url;
+          pageHtml = follow.text;
+          settings = extractSettingsJson(pageHtml);
+          owlItemId = settings?.catalog?.item_id ? String(settings.catalog.item_id) : "";
+        }
+      }
+    }
+
     if (!owlItemId) {
+      const stillSearch = /\/search\//i.test(String(pageUrl));
       return {
         ok: false,
-        errorTag: "bo_no_catalog_item_id",
+        errorTag: stillSearch ? "bo_search_no_match" : "bo_no_catalog_item_id",
         method: "ajax_price_history_6m",
         finalUrl: pageUrl,
         hops,
@@ -176,4 +250,7 @@ module.exports = {
   fetchText,
   extractSettingsJson,
   htmlFromAjaxPriceCommands,
+  pickCatalogPathFromSearch,
+  isOwlPermanentMiss,
+  isOwlSoftBlock,
 };

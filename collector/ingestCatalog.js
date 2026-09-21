@@ -36,6 +36,7 @@ const { CollectorSession, HTTP_METHOD } = require("./session");
 const { normalizeSetNo, errorLooksLikeSoftBlock } = require("./parseHtml");
 const {
   isMistypedGearAsSet,
+  isNonCanonicalGearVariant,
   isPriceIngestExcluded,
   shouldSkipCatalogIngest,
   normalizeItemNumber,
@@ -242,6 +243,11 @@ function mapCatalogDoc(doc) {
       normalizeSetNo(d.itemNumber) ||
       String(d.itemNumber || "").trim(),
     mistypedGear: isMistypedGearAsSet(d),
+    nonCanonicalGear: isNonCanonicalGearVariant({
+      itemType,
+      catalogItemId: doc.id,
+      itemNumber: d.itemNumber,
+    }),
     priceIngestExclude: isPriceIngestExcluded(d),
     supportedBlType: Boolean(BL_TYPE_PREFIX[fetchType]),
     blFetch,
@@ -1037,7 +1043,7 @@ async function main() {
           if (SHARD_COUNT > 1 && shardBucket(cat.catalogItemId, SHARD_COUNT) !== SHARD_INDEX) {
             continue;
           }
-          if (!cat.itemNumber || !cat.supportedBlType || cat.mistypedGear || cat.priceIngestExclude) continue;
+          if (shouldSkipCatalogIngest(cat)) continue;
           if (await recentlySoftBlocked(db, cat.catalogItemId)) continue;
           const needs = await currentMonthNeedsScrape(db, cat, periodId);
           if (!needs) continue;
@@ -1351,6 +1357,14 @@ async function main() {
           processed += 1;
           console.log(`SKIP ${setNo} (mistyped Gear as SET — ${cat.catalogItemId})`);
           if (source === "gap") gapHandled.add(cat.catalogItemId);
+          continue;
+        }
+
+        if (cat.nonCanonicalGear || isNonCanonicalGearVariant(cat)) {
+          skipped += 1;
+          processed += 1;
+          console.log(`SKIP ${setNo} (non-canonical GEAR *-N — ${cat.catalogItemId})`);
+          if (source === "gap" || source === "month_queue") gapHandled.add(cat.catalogItemId);
           continue;
         }
 
