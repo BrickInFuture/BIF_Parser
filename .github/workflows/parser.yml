@@ -145,7 +145,7 @@ jobs:
       BL_RAW_ONLY: "1"
       BO_SKIP_BIF: "1"
       BL_PARSE_TIMEOUT_MS: "90000"
-      BL_PAUSE_MS: "1000,2000"
+      BL_PAUSE_MS: "2000,4000"
       BL_SOFT_BLOCK_FAST_MS: "3000"
       BL_CIRCUIT_SOFT_LIMIT: "5"
       BL_CIRCUIT_STOP: "0"
@@ -221,7 +221,7 @@ jobs:
       BL_MONTH_QUEUE: "1"
       BL_MONTH_QUEUE_ERROR_BUDGET: "40"
       BL_ERROR_RETRY_IMMEDIATE: "1"
-      BL_PAUSE_MS: "1000,2000"
+      BL_PAUSE_MS: "2000,4000"
       BL_HTTP_FETCH: "1"
       BL_PROXY_URL: ${{ secrets.BL_PROXY_URL }}
     steps:

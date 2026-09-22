@@ -72,7 +72,7 @@ function formatSourceBlock(key, bucket, catalogPrimary) {
     `• запросили: ${n(req)}`,
     `• получили цену: ${n(got)}${gotPct != null ? ` (${gotPct}%)` : ""}`,
     `• пусто: ${n(empty)}`,
-    `• ошибки (в хвост месяца): ${n(err)}`,
+    `• ошибки: ${n(err)}`,
   ];
   if (soft > 0) lines.push(`• сайт резал частоту: ${n(soft)}`);
   lines.push(`• за месяц с этого источника получено цен: ${n(monthGot)}`);

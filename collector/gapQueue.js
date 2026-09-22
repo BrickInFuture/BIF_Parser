@@ -29,8 +29,16 @@ const { scoreCatalogPriority, catalogReleaseYear } = require("./catalogPriority"
 const { errorLooksLikeSoftBlock } = require("./parseHtml");
 const { PRIMARY_TYPES, typePriorityRank } = require("./ingestTypes");
 
-/** Не ставить в очередь то, что уже резали <24ч — иначе 60 слотов сгорают на SKIP. */
-const SOFT_BLOCK_SKIP_MS = 24 * 60 * 60 * 1000;
+/**
+ * Не ставить в очередь то, что недавно soft-block'нули.
+ * Должно совпадать с softRetryMs в monthQueue: иначе due-ошибки через 2.5ч
+ * снова берутся в залп и сгорают на SKIP soft_blocked <…h.
+ * IP обычно остывает ~1ч; 3ч с запасом (BL_SOFT_BLOCK_SKIP_MS).
+ */
+const SOFT_BLOCK_SKIP_MS = Math.max(
+  60 * 60 * 1000,
+  Number(process.env.BL_SOFT_BLOCK_SKIP_MS) || 3 * 60 * 60 * 1000
+);
 
 function tsToMs(v) {
   if (!v) return null;

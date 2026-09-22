@@ -67,6 +67,7 @@ const {
   recentlySoftBlocked,
   observationAlreadyPriced,
   currentUtcMonthHasPrice,
+  SOFT_BLOCK_SKIP_MS,
 } = require("./gapQueue");
 const {
   ensureMonthQueue,
@@ -1542,7 +1543,12 @@ async function main() {
           processed += 1;
           // Иначе очередь дыр снова подсовывает тот же набор по кругу.
           if (source === "gap") gapHandled.add(cat.catalogItemId);
-          console.log(`SKIP ${setNo} (soft_blocked <24h)`);
+          const skipH = Math.round(SOFT_BLOCK_SKIP_MS / 3600000 * 10) / 10;
+          console.log(`SKIP ${setNo} (soft_blocked <${skipH}h)`);
+          // Месячная очередь: вернуть в errors с тем же cool — не терять id и не брать снова через минуту.
+          if (MONTH_QUEUE && (source === "month_queue" || source === "gap")) {
+            await noteMonthQueueFail(cat.catalogItemId, "soft_blocked", "skip_recent_soft");
+          }
           continue;
         }
 
@@ -1616,8 +1622,12 @@ async function main() {
         if (!scrape.parsed?.ok) {
           lastError = scrape.parsed?.error || scrape.waitError || "parse_failed";
           console.error(`FAIL ${fetchNo}:`, lastError);
-          fail += 1;
-          chunkFail += 1;
+          const softFail = isSoftBlockTag(scrape.errorTag, lastError);
+          // Soft-block — не «ошибка в хвост месяца»; отдельный счётчик softBlocked.
+          if (!softFail) {
+            fail += 1;
+            chunkFail += 1;
+          }
           processed += 1;
           chunkDone += 1;
           noteErrorTag(scrape.errorTag);

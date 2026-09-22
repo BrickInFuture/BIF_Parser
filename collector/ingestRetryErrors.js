@@ -45,7 +45,7 @@ const LIMIT = Math.max(1, Number(flagValue("limit", "100")) || 100);
 const MAX_MINUTES = Math.max(1, Number(flagValue("maxMinutes", "60")) || 60);
 const PHASE_FLAG = String(flagValue("phase", "auto") || "auto").toLowerCase();
 const TYPES_CSV = flagValue("types", null);
-const SOFT_BLOCK_SKIP_MS = 24 * 60 * 60 * 1000;
+const { SOFT_BLOCK_SKIP_MS } = require("./gapQueue");
 
 async function listErrorObservations(db, admin, wantLimit, typePlan) {
   const pooled = [];

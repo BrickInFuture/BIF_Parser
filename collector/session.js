@@ -33,8 +33,12 @@ const BROWSER_FALLBACK_METHOD = "playwright_fallback_catalogPG";
 
 /** Adaptive floor after a success streak (ms). Overridden if BL_PAUSE_MS is tighter. */
 const ADAPTIVE_PAUSE_FLOOR = [800, 1200];
-/** Short cool before one soft-block retry (ms). */
-const SOFT_BLOCK_COOL_MS = [5000, 10000];
+/** Cool after each soft-block before next set (ms). Was 5–10s — слишком коротко на IP GitHub. */
+const SOFT_BLOCK_COOL_MS = [
+  Math.max(1, Number(process.env.BL_SOFT_BLOCK_COOL_MIN_MS) || 15000),
+  Math.max(1, Number(process.env.BL_SOFT_BLOCK_COOL_MAX_MS) || 30000),
+];
+if (SOFT_BLOCK_COOL_MS[1] < SOFT_BLOCK_COOL_MS[0]) SOFT_BLOCK_COOL_MS[1] = SOFT_BLOCK_COOL_MS[0];
 /** Successes before shrinking pause toward the adaptive floor. */
 const ADAPTIVE_SHRINK_AFTER = 3;
 /** Fail-fast soft-block detect window (ms). Logs showed ~24s wait was killing throughput. */
@@ -577,6 +581,8 @@ class CollectorSession {
 
     if (meta.softBlocked) {
       this.consecutiveSoftBlocks += 1;
+      // Всегда чуть остыть после soft — иначе бьём IP с паузой 1–2с и ловим волну.
+      const softCoolMs = await this.#softBlockCool();
       if (this.consecutiveSoftBlocks >= CIRCUIT_SOFT_LIMIT) {
         this.circuitTrips += 1;
         if (circuitCoolAndContinue()) {
@@ -603,7 +609,7 @@ class CollectorSession {
               console.warn("circuit cool rewarm failed:", e && e.message ? e.message : e);
             }
           }
-          return ms;
+          return softCoolMs + ms;
         }
         this.circuitOpen = true;
         this.stopRequested = true;
@@ -616,7 +622,7 @@ class CollectorSession {
           })
         );
       }
-      return 0;
+      return softCoolMs;
     }
 
     this.consecutiveSoftBlocks = 0;

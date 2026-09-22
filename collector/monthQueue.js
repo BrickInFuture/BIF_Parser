@@ -18,6 +18,7 @@ const { classifyCoverage } = require("./coveragePolicy");
 const { PRIMARY_TYPES, typePriorityRank } = require("./ingestTypes");
 const { errorLooksLikeSoftBlock } = require("./parseHtml");
 const { isNonCanonicalGearVariant } = require("./blUrls");
+const { SOFT_BLOCK_SKIP_MS } = require("./gapQueue");
 
 const QUEUE_COLL = "price_ingest_queues";
 const CHUNK_SIZE = Math.max(100, Number(process.env.BL_MONTH_QUEUE_CHUNK) || 500);
@@ -37,10 +38,8 @@ function chunkId(n) {
 
 function softRetryMs(errorTag, error) {
   if (errorLooksLikeSoftBlock(errorTag, error)) {
-    // IP обычно остывает быстрее часа; 45 мин (было 2.5 ч) — иначе due-очередь дует.
-    const fromEnv = Number(process.env.BL_SOFT_RETRY_MS);
-    if (Number.isFinite(fromEnv) && fromEnv >= 10 * 60 * 1000) return fromEnv;
-    return 45 * 60 * 1000;
+    // Тот же горизонт, что recentlySoftBlocked (BL_SOFT_BLOCK_SKIP_MS).
+    return SOFT_BLOCK_SKIP_MS;
   }
   const tag = String(errorTag || "").toLowerCase();
   if (tag === "window_defer") {
