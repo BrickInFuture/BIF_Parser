@@ -9,10 +9,10 @@ const GATE_COLLECTION = "system_stats";
 const GATE_DOC = "bif_collector_gate";
 const PACE_DOC = "bif_collector_pace";
 
-/** How long kick skips after a soft-block / circuit wave (ms). */
+/** How long kick skips after a soft-block / circuit wave (ms). Default 20 мин (было 60). */
 const HOT_COOL_MS = Math.max(
   60_000,
-  Number(process.env.BL_HOT_UNTIL_MS) || 60 * 60 * 1000
+  Number(process.env.BL_HOT_UNTIL_MS) || 20 * 60 * 1000
 );
 
 const DAY_PACE_TARGET = Math.max(1, Number(process.env.BL_OK_PER_DAY_TARGET) || 1150);

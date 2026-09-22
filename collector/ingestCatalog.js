@@ -182,8 +182,11 @@ async function alreadyOkThisPeriod(db, catalogItemId, periodId, cat) {
 /** Do not re-scrape a hot shell for a day; advance the cursor instead. */
 /** Consecutive soft-blocks on the same base number (8831-1, 8831-2, …) before skipping the rest. */
 const SAME_BASE_SOFT_JUMP = 2;
-/** Distinct bases that soft-blocked this window before we treat the IP as hot. */
-const MIXED_BASE_CIRCUIT = 5;
+/** Distinct bases that soft-blocked this window before in-window cool / pause. */
+const MIXED_BASE_CIRCUIT = Math.max(
+  3,
+  Number(process.env.BL_MIXED_BASE_CIRCUIT) || 6
+);
 /** After a hot-IP cool: skip this many catalog pages (×50) so we leave the sticky zone. */
 const HOT_ZONE_JUMP_PAGES = Math.max(
   1,
@@ -473,6 +476,8 @@ async function main() {
   let circuitOpenThisWindow = false;
   let lastCircuitTrips = 0;
   let hotMarkedThisWindow = false;
+  /** Сколько раз в этом окне уже ловили mixed-base волну (вторая → пауза пачки). */
+  let mixedCircuitWaves = 0;
 
   async function noteCollectorHeat(reason) {
     if (!CONFIRM || hotMarkedThisWindow) return;
@@ -490,7 +495,7 @@ async function main() {
 
   /**
    * Не потерять id, уже взятые из месячной очереди, если окно бросает их.
-   * Короткий cool (~2.5 ч), не хвост до 26-го — иначе пачка умирает после волны блоков.
+   * Короткий defer (~10 мин), не soft_blocked на 45+ мин — эти id ещё не пробовали.
    */
   async function requeuePendingAsErrors(reason) {
     if (!MONTH_QUEUE || !CONFIRM || !pendingItems.length) {
@@ -499,6 +504,10 @@ async function main() {
     }
     const left = [...pendingItems];
     pendingItems = [];
+    const coolMs = Math.max(
+      60_000,
+      Number(process.env.BL_WINDOW_DEFER_MS) || 10 * 60 * 1000
+    );
     for (const item of left) {
       const id = item?.cat?.catalogItemId;
       if (!id) continue;
@@ -506,9 +515,10 @@ async function main() {
         await pushMonthQueueError(db, admin, {
           periodId,
           catalogItemId: id,
-          errorTag: "soft_blocked",
+          errorTag: "window_defer",
           error: reason || "window_abandon",
           immediate: true,
+          coolMs,
           FieldValue,
         });
       } catch (e) {
@@ -520,7 +530,8 @@ async function main() {
         step: "month_queue_requeue_pending",
         count: left.length,
         reason: reason || "abandon",
-        cool: "soft_retry",
+        cool: "window_defer",
+        coolMs,
       })
     );
   }
@@ -570,7 +581,11 @@ async function main() {
       meta = await readMonthQueueMeta(db, periodId);
     }
 
-    const errBudget = Math.min(MONTH_QUEUE_ERROR_BUDGET, Math.max(0, Math.floor(limit * 0.2)));
+    // До ~45% пачки — due soft/defer (раньше потолок 20% резал ERROR_BUDGET=12 при limit=60).
+    const errBudget = Math.min(
+      MONTH_QUEUE_ERROR_BUDGET,
+      Math.max(0, Math.floor(limit * 0.45))
+    );
     const mainBudget = Math.max(0, limit - errBudget);
     const taken = await takeFromMonthQueue(db, admin, {
       periodId,
@@ -697,6 +712,23 @@ async function main() {
     await saveCheckpoint();
   }
 
+  /** В месячной очереди: короткий отдых в том же залпе вместо сдачи всей пачки. */
+  async function inWindowCoolAfterMixed(reason) {
+    const lo = Math.max(30_000, Number(process.env.BL_CIRCUIT_COOL_MIN_MS) || 120_000);
+    const hi = Math.max(lo, Number(process.env.BL_CIRCUIT_COOL_MAX_MS) || 240_000);
+    const ms = lo + Math.floor(Math.random() * (hi - lo + 1));
+    console.log(
+      JSON.stringify({
+        step: "month_queue_in_window_cool",
+        reason: reason || "mixed_soft_block",
+        coolMs: ms,
+        wave: mixedCircuitWaves,
+        pendingLeft: pendingItems.length,
+      })
+    );
+    await new Promise((r) => setTimeout(r, ms));
+  }
+
   function applyClusterAfterSoft(cat) {
     const cluster = noteClusterSoft(cat);
     if (cluster.jump) {
@@ -733,9 +765,20 @@ async function main() {
             cursorCatalogId,
           })
         );
+      } else if (MONTH_QUEUE) {
+        // Не бросаем пачку с первой волны — отдых в окне; вторая волна → hot_pause.
+        cluster.needsInWindowCool = true;
+        console.log(
+          JSON.stringify({
+            step: "catalog_cool_mixed_bases",
+            mixedBases: MIXED_BASE_CIRCUIT,
+            circuitTrips: session.circuitTrips,
+            cursorCatalogId,
+            action: "in_window_cool",
+          })
+        );
       } else {
         circuitOpenThisWindow = false;
-        // Реальный уход: очередь сбросим и курсор уведём в jumpCursorPastHotZone (async).
         cluster.needsCursorJump = true;
         console.log(
           JSON.stringify({
@@ -760,6 +803,25 @@ async function main() {
       );
     }
     return cluster;
+  }
+
+  async function handleMixedSoftCluster(cluster, reason) {
+    if (!cluster) return;
+    if (cluster.needsInWindowCool) {
+      mixedCircuitWaves += 1;
+      if (mixedCircuitWaves >= 2) {
+        await jumpCursorPastHotZone(reason || "mixed_soft_block_wave2");
+        circuitOpenThisWindow = true;
+        await noteCollectorHeat(reason || "mixed_soft_block_wave2");
+        return;
+      }
+      await inWindowCoolAfterMixed(reason);
+      return;
+    }
+    if (cluster.needsCursorJump) {
+      await jumpCursorPastHotZone(reason || "mixed_soft_block");
+      await noteCollectorHeat(reason || "soft_block_circuit");
+    }
   }
 
   function noteErrorTag(tag) {
@@ -1543,8 +1605,7 @@ async function main() {
           if (source === "gap" || source === "month_queue") gapHandled.add(cat.catalogItemId);
           if (isSoftBlockTag("exception", lastError)) {
             const cluster = applyClusterAfterSoft(cat);
-            if (cluster?.needsCursorJump) await jumpCursorPastHotZone("mixed_soft_exception");
-            await noteCollectorHeat("soft_block_exception");
+            await handleMixedSoftCluster(cluster, "mixed_soft_exception");
           }
           await noteMonthQueueFail(cat.catalogItemId, "exception", lastError);
           continue;
@@ -1580,15 +1641,14 @@ async function main() {
           await noteMonthQueueFail(cat.catalogItemId, scrape.errorTag || "parse_failed", lastError);
           if (isSoftBlockTag(scrape.errorTag, lastError)) {
             const cluster = applyClusterAfterSoft(cat);
-            if (cluster?.needsCursorJump) await jumpCursorPastHotZone("mixed_soft_block");
-            await noteCollectorHeat("soft_block_circuit");
+            await handleMixedSoftCluster(cluster, "mixed_soft_block");
           } else if (session.isCircuitOpen()) {
             circuitOpenThisWindow = true;
             lastError = "circuit_open_stop_window";
             stopWindow = true;
             await noteCollectorHeat("circuit_open");
           }
-          if (stopWindow) break;
+          if (stopWindow || gapPausedAfterHot) break;
           continue;
         }
 

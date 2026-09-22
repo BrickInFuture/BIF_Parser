@@ -37,10 +37,17 @@ function chunkId(n) {
 
 function softRetryMs(errorTag, error) {
   if (errorLooksLikeSoftBlock(errorTag, error)) {
-    // IP остывает за ~1ч; берём 2–3ч с запасом, не ждём 26-го.
-    return 2.5 * 60 * 60 * 1000;
+    // IP обычно остывает быстрее часа; 45 мин (было 2.5 ч) — иначе due-очередь дует.
+    const fromEnv = Number(process.env.BL_SOFT_RETRY_MS);
+    if (Number.isFinite(fromEnv) && fromEnv >= 10 * 60 * 1000) return fromEnv;
+    return 45 * 60 * 1000;
   }
   const tag = String(errorTag || "").toLowerCase();
+  if (tag === "window_defer") {
+    const defer = Number(process.env.BL_WINDOW_DEFER_MS);
+    if (Number.isFinite(defer) && defer >= 60_000) return defer;
+    return 10 * 60 * 1000;
+  }
   if (tag.includes("parse") || tag === "partial_prices") return 45 * 60 * 1000;
   if (tag.includes("timeout") || tag.includes("net")) return 60 * 60 * 1000;
   return 90 * 60 * 1000;
@@ -360,8 +367,10 @@ async function takeFromMonthQueue(db, admin, opts = {}) {
 
 /**
  * Ошибка съёма → в очередь повтора (не теряем после take).
- * Soft-block / 429 — короткий cool (~2.5 ч), не хвост до 26-го.
+ * Soft-block / 429 — короткий cool (~45 мин), не хвост до 26-го.
+ * window_defer (брошенная пачка) — ещё короче (~10 мин).
  * Остальные ошибки по умолчанию в хвост месяца (пока BL_ERROR_RETRY_IMMEDIATE=1).
+ * opts.coolMs — явный override.
  */
 async function pushMonthQueueError(db, admin, opts = {}) {
   const FieldValue = opts.FieldValue || admin.firestore.FieldValue;
@@ -374,8 +383,11 @@ async function pushMonthQueueError(db, admin, opts = {}) {
   const error = opts.error || null;
   const soft = errorLooksLikeSoftBlock(errorTag, error);
   let cool;
-  if (
+  if (opts.coolMs != null && Number.isFinite(Number(opts.coolMs))) {
+    cool = Math.max(60_000, Number(opts.coolMs));
+  } else if (
     soft ||
+    String(errorTag || "") === "window_defer" ||
     process.env.BL_ERROR_RETRY_IMMEDIATE === "1" ||
     opts.immediate === true
   ) {

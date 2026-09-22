@@ -925,9 +925,11 @@ function parseCatalogPgHtml(html) {
     return result;
   }
 
-  // Gear/Parts thin PG without sales chrome and without Oops → empty market, not soft-block.
+  // Gear/Parts: только явный пустой рынок → no_data.
+  // Тонкий shell без маркеров пустоты — soft-block (иначе блок сайта хороним как «пусто навсегда»).
   if (
     /Price Guide\s*-\s*(Gear|Catalog\s*Item|Part)/i.test(title) &&
+    looksEmptyPriceGuide(raw) &&
     !hasPriceGuideContent(raw) &&
     raw.length >= 4000 &&
     !/Oops/i.test(title) &&
