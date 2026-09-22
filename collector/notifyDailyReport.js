@@ -105,8 +105,11 @@ function buildVerdict(stats, queueRemainingBl) {
     new Intl.DateTimeFormat("en-CA", { timeZone: "UTC", day: "2-digit" }).format(now)
   );
   const daysLeft = Math.max(1, 26 - utcDay + 1);
-  const needPerDay = Math.ceil(Math.max(0, monthTarget - unique) / daysLeft);
+  // Правда = дыры в очереди / дни, не «весь каталог минус только с ценой».
   const remaining = Number(queueRemainingBl);
+  const needPerDay = Number.isFinite(remaining)
+    ? Math.ceil(Math.max(0, remaining) / daysLeft)
+    : Math.ceil(Math.max(0, monthTarget - unique) / daysLeft);
   const gotPct = pct(dayGot, dayReq);
 
   let paceEmoji = "🟢";

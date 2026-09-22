@@ -22,6 +22,7 @@ const {
   looksSoftBlockShell,
 } = require("./parseHtml");
 const { marketCatalogPgUrl, normalizeItemNumber } = require("./blUrls");
+const { parseProxyUrl: parseProxyUrlShared, fetchViaProxy } = require("./httpProxy");
 
 const DEFAULT_TIMEOUT_MS = Number(process.env.BL_PARSE_TIMEOUT_MS || 90000) || 90000;
 const DEFAULT_USER_AGENT =
@@ -424,22 +425,36 @@ class CollectorSession {
     let status = 0;
     let html = "";
     let err = null;
+    const headers = {
+      "User-Agent": this.httpUserAgent || DEFAULT_USER_AGENT,
+      Accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.9",
+      "Cache-Control": "no-cache",
+      Referer: "https://www.market.com/",
+    };
     try {
-      const res = await fetch(url, {
-        redirect: "follow",
-        headers: {
-          "User-Agent": this.httpUserAgent || DEFAULT_USER_AGENT,
-          Accept:
-            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9",
-          "Cache-Control": "no-cache",
-          Referer: "https://www.market.com/",
-          Cookie: this.httpCookieHeader || "",
-        },
-        signal: AbortSignal.timeout(this.timeoutMs),
-      });
-      status = res.status;
-      html = await res.text();
+      const proxy = parseProxyUrl(this.proxyUrl);
+      // Same proxy as Playwright warm-up: API request on that context (cookie + IP stick).
+      if (proxy && this.context && this.context.request) {
+        const res = await this.context.request.get(url, {
+          headers,
+          timeout: this.timeoutMs,
+          maxRedirects: 5,
+        });
+        status = res.status();
+        html = await res.text();
+      } else {
+        headers.Cookie = this.httpCookieHeader || "";
+        const res = await fetchViaProxy(url, {
+          redirect: "follow",
+          headers,
+          signal: AbortSignal.timeout(this.timeoutMs),
+          proxyUrl: this.proxyUrl || undefined,
+        });
+        status = res.status;
+        html = await res.text();
+      }
     } catch (e) {
       err = e && e.message ? e.message : String(e);
     }
@@ -782,11 +797,11 @@ class CollectorSession {
     let res = await this.#httpGet(url);
     if (timing) timing.navMs += res.ms;
 
-    // В каталоге (shallow) на 429 не ждём вообще — сразу soft-block и следующий набор.
-    // Глубокий повтор — только в ручном/Pro режиме (retry-errors).
+    // В каталоге (shallow) — один короткий повтор на 429, потом soft-block.
+    // Глубокий режим (Pro / retry-errors) — из BL_HTTP_429_RETRIES (по умолчанию 1).
     const shallow = !!opts.catalogPass || !!opts.fastFail;
     const max429Retries = shallow
-      ? 0
+      ? Math.max(1, Number(process.env.BL_HTTP_429_SHALLOW_RETRIES || 1) || 1)
       : Math.max(0, Number(process.env.BL_HTTP_429_RETRIES || 1) || 1);
     let attempts429 = 0;
     while (res.status === 429 && attempts429 < max429Retries) {

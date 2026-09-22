@@ -538,11 +538,10 @@ function isWafChallengePage(html) {
     return true;
   }
 
-  // Soft-block: large-ish page with Price Guide title but no sales/listings chrome
+  // Soft-block: Set/Minifig title with no sales chrome (classic anti-bot shell).
+  // Broad "market Price Guide" matched Gear/Parts empty markets too — those are no_data.
   const titleOnly =
-    /Price Guide\s*-\s*Set/i.test(raw) ||
-    /Price Guide\s*-\s*Minifig/i.test(raw) ||
-    /BrickLink\s+Price\s+Guide/i.test(raw);
+    /Price Guide\s*-\s*Set/i.test(raw) || /Price Guide\s*-\s*Minifig/i.test(raw);
   if (titleOnly && raw.length > 8000 && !hasPriceGuideContent(raw)) {
     return true;
   }
@@ -920,6 +919,21 @@ function parseCatalogPgHtml(html) {
 
   // Dead catalog entry (small PNF) → empty market. Large PNF → soft-block below.
   if (isDeadCatalogPage(raw, title)) {
+    result.ok = true;
+    result.empty = true;
+    result.error = null;
+    return result;
+  }
+
+  // Gear/Parts thin PG without sales chrome and without Oops → empty market, not soft-block.
+  if (
+    /Price Guide\s*-\s*(Gear|Catalog\s*Item|Part)/i.test(title) &&
+    !hasPriceGuideContent(raw) &&
+    raw.length >= 4000 &&
+    !/Oops/i.test(title) &&
+    !/Sorry!\s*\|\s*BrickLink/i.test(title) &&
+    !hasPageNotFoundMarker(title, raw)
+  ) {
     result.ok = true;
     result.empty = true;
     result.error = null;

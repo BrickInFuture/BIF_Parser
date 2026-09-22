@@ -360,7 +360,8 @@ async function takeFromMonthQueue(db, admin, opts = {}) {
 
 /**
  * Ошибка съёма → в очередь повтора (не теряем после take).
- * По умолчанию retryAfterMs далеко в хвост месяца (не каждый залп).
+ * Soft-block / 429 — короткий cool (~2.5 ч), не хвост до 26-го.
+ * Остальные ошибки по умолчанию в хвост месяца (пока BL_ERROR_RETRY_IMMEDIATE=1).
  */
 async function pushMonthQueueError(db, admin, opts = {}) {
   const FieldValue = opts.FieldValue || admin.firestore.FieldValue;
@@ -371,10 +372,13 @@ async function pushMonthQueueError(db, admin, opts = {}) {
   if (!catalogItemId) return null;
   const errorTag = opts.errorTag || null;
   const error = opts.error || null;
-  // Хвост месяца: ошибки не мешаем в обычные залпы (retryAfter далеко),
-  // пока BL_ERROR_RETRY_IMMEDIATE=1 не включит старый короткий cool.
+  const soft = errorLooksLikeSoftBlock(errorTag, error);
   let cool;
-  if (process.env.BL_ERROR_RETRY_IMMEDIATE === "1" || opts.immediate === true) {
+  if (
+    soft ||
+    process.env.BL_ERROR_RETRY_IMMEDIATE === "1" ||
+    opts.immediate === true
+  ) {
     cool = softRetryMs(errorTag, error);
   } else {
     // ~до 26-го числа UTC текущего месяца + небольшой запас.

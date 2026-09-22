@@ -11,6 +11,7 @@
 
 const { brickOwlSearchSetUrl, brickOwlBoidUrl } = require("./boUrls");
 const { parseBrickOwlPriceHistoryHtml, sixMonthSoldFromParse } = require("./parsePriceHistoryHtml");
+const { fetchViaProxy, proxyEnvUrl } = require("../httpProxy");
 
 /** Навсегда нет на Owl — не жара IP, пишем no_data. */
 function isOwlPermanentMiss(errorTag) {
@@ -36,7 +37,7 @@ const DEFAULT_UA =
   "BrickInFuture-parser/1.0 (+https://brickinfuture.com; price-history research)";
 
 async function fetchText(url, opts = {}) {
-  const res = await fetch(url, {
+  const res = await fetchViaProxy(url, {
     redirect: "follow",
     headers: {
       "User-Agent": DEFAULT_UA,
@@ -45,6 +46,7 @@ async function fetchText(url, opts = {}) {
       "X-Requested-With": "XMLHttpRequest",
       ...(opts.headers || {}),
     },
+    proxyUrl: opts.proxyUrl || proxyEnvUrl() || undefined,
   });
   const text = await res.text();
   return { ok: res.ok, status: res.status, url: res.url || url, text };

@@ -488,7 +488,10 @@ async function main() {
     }
   }
 
-  /** Не потерять id, уже взятые из месячной очереди, если окно бросает их. */
+  /**
+   * Не потерять id, уже взятые из месячной очереди, если окно бросает их.
+   * Короткий cool (~2.5 ч), не хвост до 26-го — иначе пачка умирает после волны блоков.
+   */
   async function requeuePendingAsErrors(reason) {
     if (!MONTH_QUEUE || !CONFIRM || !pendingItems.length) {
       pendingItems = [];
@@ -505,6 +508,7 @@ async function main() {
           catalogItemId: id,
           errorTag: "soft_blocked",
           error: reason || "window_abandon",
+          immediate: true,
           FieldValue,
         });
       } catch (e) {
@@ -516,6 +520,7 @@ async function main() {
         step: "month_queue_requeue_pending",
         count: left.length,
         reason: reason || "abandon",
+        cool: "soft_retry",
       })
     );
   }
