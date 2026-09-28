@@ -20,7 +20,9 @@ const {
 } = require("../monthQueue");
 const {
   bumpParserStats,
-  wasUniquePricedThisMonth,
+  createStatsAccumulator,
+  prevAnswerFromObservation,
+  trackMonthAnswer,
 } = require("../parserStats");
 const { setNoFromCatalogItemId } = require("./boUrls");
 const {
@@ -184,6 +186,7 @@ async function main() {
   let softBlocked = 0;
   let consecutiveSoftFails = 0;
   let circuitTripped = false;
+  const statsAcc = createStatsAccumulator();
 
   for (const task of tasks) {
     if (Date.now() >= deadlineMs) {
@@ -198,6 +201,7 @@ async function main() {
 
     let cachedOwlItemId = null;
     let cachedBoid = null;
+    let prevAnswer = null;
     try {
       const snap = await db
         .collection("market_observations")
@@ -207,6 +211,7 @@ async function main() {
         const d = snap.data() || {};
         cachedOwlItemId = d.owlItemId ? String(d.owlItemId) : null;
         cachedBoid = d.boid ? String(d.boid) : null;
+        prevAnswer = prevAnswerFromObservation(d, queuePeriodId);
       }
     } catch {
       //
@@ -258,6 +263,15 @@ async function main() {
         } catch (e) {
           console.warn("owl miss write failed", catalogItemId, e && e.message ? e.message : e);
         }
+        statsAcc.add(cat.itemType, "empty");
+        await trackMonthAnswer(db, statsAcc, {
+          catalogItemId,
+          itemType: cat.itemType,
+          source: "brickowl",
+          periodId: queuePeriodId,
+          kind: "empty",
+          prevKind: prevAnswer,
+        });
         try {
           await clearMonthQueueError(db, queuePeriodId, catalogItemId, "brickowl");
         } catch {
@@ -276,6 +290,7 @@ async function main() {
       }
 
       fail += 1;
+      statsAcc.add(cat.itemType, isOwlSoftBlock(tag) ? "softBlocked" : "errors");
       try {
         await writeRawBrickOwlError(
           db,
@@ -332,20 +347,6 @@ async function main() {
     }
 
     consecutiveSoftFails = 0;
-    let alreadyPriced = false;
-    if (!fetched.empty) {
-      try {
-        alreadyPriced = await wasUniquePricedThisMonth(
-          db,
-          catalogItemId,
-          "brickowl",
-          writePeriodId
-        );
-      } catch {
-        alreadyPriced = false;
-      }
-    }
-
     const raw = await writeRawBrickOwlSixMonthAsLastClosed(
       db,
       admin.firestore,
@@ -365,10 +366,19 @@ async function main() {
       { dryRun: false }
     );
 
-    if (raw.status === "ok") {
-      ok += 1;
-      if (!alreadyPriced) uniquePriced += 1;
-    } else noData += 1;
+    const answerKind = raw.status === "ok" ? "priced" : "empty";
+    if (answerKind === "priced") ok += 1;
+    else noData += 1;
+    statsAcc.add(cat.itemType, answerKind === "priced" ? "gotPrice" : "empty");
+    const answer = await trackMonthAnswer(db, statsAcc, {
+      catalogItemId,
+      itemType: cat.itemType,
+      source: "brickowl",
+      periodId: queuePeriodId,
+      kind: answerKind,
+      prevKind: prevAnswer,
+    });
+    if (answer.priced > 0) uniquePriced += 1;
     processed += 1;
     try {
       await clearMonthQueueError(db, queuePeriodId, catalogItemId, "brickowl");
@@ -391,17 +401,20 @@ async function main() {
   }
 
   try {
+    const t = statsAcc.totals();
     await bumpParserStats(
       db,
       admin.firestore,
       "brickowl",
       {
-        requested: processed,
-        gotPrice: ok,
-        empty: noData,
-        errors: fail,
-        softBlocked,
-        uniquePriced,
+        requested: t.requested,
+        gotPrice: t.gotPrice,
+        empty: t.empty,
+        errors: t.errors,
+        softBlocked: t.softBlocked,
+        uniquePriced: t.uniquePriced,
+        byType: statsAcc.byType,
+        uniqueByType: statsAcc.uniqueByType,
       },
       { periodId: queuePeriodId }
     );

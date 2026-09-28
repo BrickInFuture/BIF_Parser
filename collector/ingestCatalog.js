@@ -83,7 +83,8 @@ const { writeIngestArtifact } = require("./ingestReportArtifacts");
 const { markCollectorHot, bumpDayPace } = require("./collectorGate");
 const {
   bumpParserStats,
-  wasUniquePricedThisMonth,
+  createStatsAccumulator,
+  trackMonthAnswer,
 } = require("./parserStats");
 
 function flagValue(name, fallback = null) {
@@ -462,7 +463,7 @@ async function main() {
   let chunkDone = 0;
   let chunkOkWithPrices = 0;
   let chunkNoData = 0;
-  let chunkUniquePriced = 0;
+  const statsAcc = createStatsAccumulator();
   let chunkSoftBlocked = 0;
   let chunkFail = 0;
   let gapRefills = 0;
@@ -1592,6 +1593,7 @@ async function main() {
           processed += 1;
           chunkDone += 1;
           noteErrorTag("exception");
+          statsAcc.add(cat.itemType, isSoftBlockTag("exception", lastError) ? "softBlocked" : "errors");
           if (CONFIRM) {
             await writeObservationFromParse(
               db,
@@ -1631,6 +1633,7 @@ async function main() {
           processed += 1;
           chunkDone += 1;
           noteErrorTag(scrape.errorTag);
+          statsAcc.add(cat.itemType, softFail ? "softBlocked" : "errors");
           if (CONFIRM) {
             await writeObservationFromParse(
               db,
@@ -1660,20 +1663,6 @@ async function main() {
           }
           if (stopWindow || gapPausedAfterHot) break;
           continue;
-        }
-
-        // Уникальность «с ценой месяца» — до записи.
-        if (!scrape.parsed.empty && CONFIRM) {
-          try {
-            cat._alreadyPricedThisMonth = await wasUniquePricedThisMonth(
-              db,
-              cat.catalogItemId,
-              "bricklink",
-              periodId
-            );
-          } catch {
-            cat._alreadyPricedThisMonth = false;
-          }
         }
 
         const write = await writeObservationFromParse(
@@ -1708,17 +1697,6 @@ async function main() {
             rrpOk &&
             (cov.preferBootstrapIfEmpty || cov.cohort === "novelty")
           ) {
-            let alreadyPriced = false;
-            try {
-              alreadyPriced = await wasUniquePricedThisMonth(
-                db,
-                cat.catalogItemId,
-                "bricklink",
-                periodId
-              );
-            } catch {
-              alreadyPriced = false;
-            }
             const boot = await writeRrpBootstrapObservation(
               db,
               admin.firestore,
@@ -1737,13 +1715,23 @@ async function main() {
               chunkNoData -= 1;
               okWithPrices += 1;
               chunkOkWithPrices += 1;
-              if (!alreadyPriced) chunkUniquePriced += 1;
             }
           }
         } else {
           okWithPrices += 1;
           chunkOkWithPrices += 1;
-          if (!cat._alreadyPricedThisMonth) chunkUniquePriced += 1;
+        }
+        // В отчёт: оценка от цены магазина — не найденная цена, рынок пустой.
+        const answerKind = empty ? "empty" : "priced";
+        statsAcc.add(cat.itemType, empty ? "empty" : "gotPrice");
+        if (CONFIRM) {
+          await trackMonthAnswer(db, statsAcc, {
+            catalogItemId: cat.catalogItemId,
+            itemType: cat.itemType,
+            source: "bricklink",
+            periodId,
+            kind: answerKind,
+          });
         }
         processed += 1;
         chunkDone += 1;
@@ -1832,13 +1820,16 @@ async function main() {
       }
     }
     try {
+      const t = statsAcc.totals();
       await bumpParserStats(db, admin.firestore, "bricklink", {
-        requested: chunkDone,
-        gotPrice: chunkOkWithPrices,
-        empty: chunkNoData,
-        errors: chunkFail,
-        softBlocked: chunkSoftBlocked,
-        uniquePriced: chunkUniquePriced,
+        requested: t.requested,
+        gotPrice: t.gotPrice,
+        empty: t.empty,
+        errors: t.errors,
+        softBlocked: t.softBlocked,
+        uniquePriced: t.uniquePriced,
+        byType: statsAcc.byType,
+        uniqueByType: statsAcc.uniqueByType,
       }, { periodId });
     } catch (e) {
       console.warn("bumpParserStats failed:", e && e.message ? e.message : e);

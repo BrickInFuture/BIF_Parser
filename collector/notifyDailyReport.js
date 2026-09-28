@@ -3,162 +3,209 @@
  *
  *   node collector/notifyDailyReport.js
  *
- * Цифры только из накопительных счётчиков (parserStats), без полного скана.
+ * Дёшево: 1 документ счётчиков + 2 меты очередей + счётчики (count) каталога и очередей
+ * повтора — порядка 50 чтений на отчёт, без обхода наблюдений.
  */
 "use strict";
 
 const fs = require("fs");
 const { initFirebaseAdmin } = require("./firebaseAdmin");
 const { utcYearMonth } = require("./gapLedger");
-const { readParserStats, REPORT_TZ, yerevanDayId } = require("./parserStats");
-const { readMonthQueueMeta } = require("./monthQueue");
-const { formatReportDateRu, periodIdRu } = require("./notifyIngestReport");
+const { readParserStats, REPORT_TZ, yerevanDayId, emptyAttempts } = require("./parserStats");
+const { readMonthQueueMeta, queueRef } = require("./monthQueue");
+const { periodIdRu } = require("./notifyIngestReport");
 
-const SUCCESS_PCT_TARGET = 90;
-const WARN_PCT = 70;
-const DAY_TARGET = Math.max(1, Number(process.env.BL_OK_PER_DAY_TARGET) || 1150);
+const REPORT_TYPES = [
+  ["SET", "Наборы"],
+  ["MINIFIG", "Минифигурки"],
+  ["GEAR", "Сувениры"],
+  ["OTHER", "Прочее"],
+];
+const SOURCE_TITLES = { bricklink: "BrickLink", brickowl: "Brick Owl" };
+const MAIN_SOURCE = "bricklink";
+/** До этого часа по Еревану отчёт считается за вчера (запуск в 23:59 мог уехать за полночь). */
+const LATE_RUN_HOUR = 6;
 
-function n(v) {
-  if (v == null || v === "" || !Number.isFinite(Number(v))) return "—";
-  return String(v);
+function fmt(v) {
+  const x = Number(v);
+  if (!Number.isFinite(x)) return "—";
+  return String(Math.round(x)).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
 }
 
-function catalogSize(stats) {
-  const c = stats && stats.catalogPrimary;
-  if (c == null || c === "" || !Number.isFinite(Number(c)) || Number(c) <= 0) return null;
-  return Math.floor(Number(c));
+function pct(a, b) {
+  const x = Number(a);
+  const y = Number(b);
+  if (!Number.isFinite(x) || !Number.isFinite(y) || y <= 0) return null;
+  return Math.round((x / y) * 1000) / 10;
 }
 
-function pct(got, req) {
-  const g = Number(got);
-  const r = Number(req);
-  if (!Number.isFinite(g) || !Number.isFinite(r) || r <= 0) return null;
-  return Math.round((g / r) * 1000) / 10;
-}
-
-function successMark(gotPct) {
-  if (gotPct == null) return "⚪";
-  if (gotPct >= SUCCESS_PCT_TARGET) return "🟢";
-  if (gotPct >= WARN_PCT) return "🟡";
-  return "🔴";
-}
-
-function sourceTitle(key) {
-  if (key === "brickowl") return "Brick Owl";
-  return "BrickLink";
-}
-
-function formatSourceBlock(key, bucket, catalogPrimary) {
-  const req = Number(bucket.dayRequested) || 0;
-  const got = Number(bucket.dayGotPrice) || 0;
-  const empty = Number(bucket.dayEmpty) || 0;
-  const err = Number(bucket.dayErrors) || 0;
-  const soft = Number(bucket.daySoftBlocked) || 0;
-  const monthGot = Number(bucket.monthGotPrice) || 0;
-  const unique = Number(bucket.monthUniquePriced) || 0;
-  const gotPct = pct(got, req);
-  const mark = successMark(gotPct);
-  const catalog =
-    catalogPrimary != null && Number.isFinite(Number(catalogPrimary)) && Number(catalogPrimary) > 0
-      ? Math.floor(Number(catalogPrimary))
-      : null;
-  const coverPct =
-    catalog != null && Number.isFinite(unique)
-      ? Math.round((unique / catalog) * 1000) / 10
-      : null;
-
-  const lines = [
-    `Источник: ${sourceTitle(key)} ${mark}`,
-    `• запросили: ${n(req)}`,
-    `• получили цену: ${n(got)}${gotPct != null ? ` (${gotPct}%)` : ""}`,
-    `• пусто: ${n(empty)}`,
-    `• ошибки: ${n(err)}`,
-  ];
-  if (soft > 0) lines.push(`• сайт резал частоту: ${n(soft)}`);
-  lines.push(`• за месяц с этого источника получено цен: ${n(monthGot)}`);
-  lines.push(
-    `• наборов со свежей ценой месяца: ${n(unique)}${
-      catalog != null ? ` из ${catalog}` : ""
-    }${coverPct != null ? ` (${coverPct}%)` : ""}`
+function yerevanHour(date) {
+  return Number(
+    new Intl.DateTimeFormat("en-GB", { timeZone: REPORT_TZ, hour: "2-digit", hour12: false }).format(date)
   );
+}
+
+/** За какой день Еревана отчёт: после полуночи до 06:00 — за вчера. */
+function reportDayId(now = new Date()) {
+  if (yerevanHour(now) < LATE_RUN_HOUR) {
+    return yerevanDayId(new Date(now.getTime() - LATE_RUN_HOUR * 60 * 60 * 1000));
+  }
+  return yerevanDayId(now);
+}
+
+function dayIdRu(dayId) {
+  const [y, m, d] = String(dayId).split("-").map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d, 12));
+  return new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long", timeZone: "UTC" }).format(date);
+}
+
+/** Дней до конца месяца (UTC), считая день отчёта. */
+function daysLeftInMonth(dayId) {
+  const [y, m, d] = String(dayId).split("-").map(Number);
+  const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  return Math.max(1, last - d + 1);
+}
+
+function dayAttempts(bucket, dayId) {
+  const fromHistory = bucket && bucket.days && bucket.days[dayId];
+  if (fromHistory) return { ...emptyAttempts(), ...fromHistory };
+  if (bucket && String(bucket.yerevanDay || "") === dayId) {
+    return {
+      requested: Number(bucket.dayRequested) || 0,
+      gotPrice: Number(bucket.dayGotPrice) || 0,
+      empty: Number(bucket.dayEmpty) || 0,
+      errors: Number(bucket.dayErrors) || 0,
+      softBlocked: Number(bucket.daySoftBlocked) || 0,
+    };
+  }
+  return emptyAttempts();
+}
+
+function monthAttempts(bucket) {
+  const byType = (bucket && bucket.monthByType) || {};
+  if (Object.keys(byType).length) {
+    const t = emptyAttempts();
+    for (const row of Object.values(byType)) {
+      for (const f of Object.keys(t)) t[f] += Number(row[f]) || 0;
+    }
+    return t;
+  }
+  return {
+    requested: Number(bucket?.monthRequested) || 0,
+    gotPrice: Number(bucket?.monthGotPrice) || 0,
+    empty: Number(bucket?.monthEmpty) || 0,
+    errors: Number(bucket?.monthErrors) || 0,
+    softBlocked: Number(bucket?.softBlocked) || 0,
+  };
+}
+
+function uniqueAnswered(bucket) {
+  let n = 0;
+  for (const row of Object.values((bucket && bucket.monthUniqueByType) || {})) {
+    n += (Number(row.priced) || 0) + (Number(row.empty) || 0);
+  }
+  return n;
+}
+
+function formatDayLine(key, a) {
+  const parts = [
+    `запросов ${fmt(a.requested)}`,
+    `цена ${fmt(a.gotPrice)}`,
+    `пусто ${fmt(a.empty)}`,
+    `ошибки ${fmt(a.errors)}`,
+  ];
+  if (a.softBlocked > 0) parts.push(`сайт резал ${fmt(a.softBlocked)}`);
+  return `${SOURCE_TITLES[key]}: ${parts.join(" · ")}`;
+}
+
+function formatMonthBlock(key, bucket, catalogByType, queue) {
+  const a = monthAttempts(bucket);
+  const lines = [
+    `За месяц · ${SOURCE_TITLES[key]}`,
+    `Попыток: ${fmt(a.requested)} · ошибки ${fmt(a.errors)} · сайт резал ${fmt(a.softBlocked)}`,
+  ];
+  const uniq = (bucket && bucket.monthUniqueByType) || {};
+  const attemptsByType = (bucket && bucket.monthByType) || {};
+  for (const [type, title] of REPORT_TYPES) {
+    const u = uniq[type] || {};
+    const priced = Number(u.priced) || 0;
+    const empty = Number(u.empty) || 0;
+    const total = catalogByType ? Number(catalogByType[type]) : NaN;
+    const tries = Number(attemptsByType[type]?.requested) || 0;
+    if (type === "OTHER" && !priced && !empty && !tries) continue;
+    const answered = priced + empty;
+    const share = Number.isFinite(total) && total > 0 ? pct(answered, total) : null;
+    const parts = [];
+    if (tries) parts.push(`попыток ${fmt(tries)}`);
+    parts.push(`цена ${fmt(priced)}`, `пусто ${fmt(empty)}`);
+    parts.push(
+      `с ответом ${fmt(answered)}${Number.isFinite(total) && total > 0 ? ` из ${fmt(total)}` : ""}${
+        share != null ? ` (${share}%)` : ""
+      }`
+    );
+    lines.push(`• ${title}: ${parts.join(" · ")}`);
+  }
+  if (queue) {
+    lines.push(`На повтор: ${fmt(queue.retry)} · ещё не брали: ${fmt(queue.remaining)}`);
+  }
   return lines;
 }
 
-function buildVerdict(stats, queueRemainingBl) {
+function buildVerdict(stats, opts) {
   const bl = stats.bySource.bricklink || {};
-  const owl = stats.bySource.brickowl || {};
-  const dayGot = (Number(bl.dayGotPrice) || 0) + (Number(owl.dayGotPrice) || 0);
-  const dayReq = (Number(bl.dayRequested) || 0) + (Number(owl.dayRequested) || 0);
-  const daySoft = (Number(bl.daySoftBlocked) || 0) + (Number(owl.daySoftBlocked) || 0);
-  const uniqueBl = Number(bl.monthUniquePriced) || 0;
-  const uniqueOwl = Number(owl.monthUniquePriced) || 0;
-  const unique = uniqueBl;
-  const catalog = catalogSize(stats);
-  // Цель покрытия = размер каталога съёма (eligible), не мифические 30k уникальных.
-  const monthTarget =
-    catalog != null
-      ? catalog
-      : Math.max(1, Number(process.env.BL_MONTH_UNIQUE_TARGET) || 22000);
-
-  const now = new Date();
-  const utcDay = Number(
-    new Intl.DateTimeFormat("en-CA", { timeZone: "UTC", day: "2-digit" }).format(now)
+  const dayId = opts.dayId;
+  const day = dayAttempts(bl, dayId);
+  const catalogTotal = ["SET", "MINIFIG", "GEAR"].reduce(
+    (s, t) => s + (Number(opts.catalogByType?.[t]) || 0),
+    0
   );
-  const daysLeft = Math.max(1, 26 - utcDay + 1);
-  // Правда = дыры в очереди / дни, не «весь каталог минус только с ценой».
-  const remaining = Number(queueRemainingBl);
-  const needPerDay = Number.isFinite(remaining)
-    ? Math.ceil(Math.max(0, remaining) / daysLeft)
-    : Math.ceil(Math.max(0, monthTarget - unique) / daysLeft);
-  const gotPct = pct(dayGot, dayReq);
+  const left = catalogTotal > 0 ? Math.max(0, catalogTotal - uniqueAnswered(bl)) : null;
+  const daysLeft = daysLeftInMonth(dayId);
+  const need = left != null ? Math.ceil(left / daysLeft) : null;
+  const dayAnswers = day.gotPrice + day.empty;
 
-  let paceEmoji = "🟢";
-  let paceText = "успеваем по этому месяцу";
-  if (remaining > daysLeft * DAY_TARGET * 1.2 || needPerDay > DAY_TARGET * 1.3) {
-    paceEmoji = "🔴";
-    paceText = "отстаём по этому месяцу";
-  } else if (remaining > daysLeft * DAY_TARGET * 0.85 || needPerDay > DAY_TARGET) {
-    paceEmoji = "🟡";
-    paceText = "на грани — темп надо держать";
+  let pace;
+  if (!day.requested) pace = "⚪ за день парсер не работал";
+  else if (need == null) pace = "⚪ темп не посчитать";
+  else if (dayAnswers >= need) pace = "🟢 успеваем закрыть месяц";
+  else if (dayAnswers >= need * 0.6) pace = "🟡 на грани";
+  else pace = "🔴 не успеваем закрыть месяц";
+
+  const softShare = pct(day.softBlocked, day.requested);
+  let block = "🟢 сайт не режет";
+  if (softShare != null && softShare >= 30) block = `🔴 сайт сильно режет (${softShare}% запросов)`;
+  else if (softShare != null && softShare >= 10) block = `🟡 сайт иногда режет (${softShare}% запросов)`;
+
+  const lines = ["", `Вывод: ${pace}`];
+  if (left != null) {
+    lines.push(
+      `• без ответа ${SOURCE_TITLES[MAIN_SOURCE]}: ${fmt(left)} · дней до конца месяца: ${daysLeft} · нужно ~${fmt(need)}/день`
+    );
   }
-
-  let blockEmoji = "🟢";
-  let blockText = "блокировок мало";
-  if (daySoft >= 20 || (gotPct != null && gotPct < WARN_PCT && dayReq >= 20)) {
-    blockEmoji = "🔴";
-    blockText = "сильно режут / много пустых";
-  } else if (daySoft >= 5 || (gotPct != null && gotPct < SUCCESS_PCT_TARGET && dayReq >= 20)) {
-    blockEmoji = "🟡";
-    blockText = "сайт иногда режет";
-  }
-
-  return [
-    "",
-    `Вывод: ${paceEmoji} ${paceText}`,
-    `• очередь BL осталось: ${Number.isFinite(remaining) ? remaining : "—"} · нужно ~${needPerDay}/день`,
-    `• уникальных с ценой месяца (BL): ${unique}${catalog != null ? ` из ${catalog}` : ""}`,
-    `• Owl уникальных за месяц: ${uniqueOwl}`,
-    `${blockEmoji} ${blockText} · блокировок за день: ${daySoft}`,
-  ];
+  lines.push(`• ответов за день: ${fmt(dayAnswers)}`);
+  if (day.requested) lines.push(block);
+  return lines;
 }
 
 function buildDailyReportText(stats, opts = {}) {
-  const when = formatReportDateRu(new Date(), REPORT_TZ);
+  const dayId = opts.dayId || reportDayId();
   const monthNom = periodIdRu(stats.periodId, "nominative");
-  const catalog = catalogSize(stats);
+  const o = { ...opts, dayId };
+  const queues = opts.queues || {};
   const lines = [
-    "📊 Парсер цен — дневной отчёт",
-    when,
+    `📊 Парсер цен · отчёт за ${dayIdRu(dayId)}`,
     `(Ереван · ${monthNom})`,
     "",
-    ...formatSourceBlock("bricklink", stats.bySource.bricklink || {}, catalog),
+    "За день",
+    formatDayLine("bricklink", dayAttempts(stats.bySource.bricklink, dayId)),
+    formatDayLine("brickowl", dayAttempts(stats.bySource.brickowl, dayId)),
     "",
-    ...formatSourceBlock("brickowl", stats.bySource.brickowl || {}, catalog),
-    ...buildVerdict(stats, opts.queueRemainingBl),
+    ...formatMonthBlock("bricklink", stats.bySource.bricklink, opts.catalogByType, queues.bricklink),
+    "",
+    ...formatMonthBlock("brickowl", stats.bySource.brickowl, opts.catalogByType, queues.brickowl),
+    ...buildVerdict(stats, o),
   ];
-  if (opts.runUrl) {
-    lines.push("", `Лог: ${opts.runUrl}`);
-  }
+  if (opts.runUrl) lines.push("", `Лог: ${opts.runUrl}`);
   return lines.join("\n");
 }
 
@@ -188,19 +235,51 @@ async function sendTelegram(text) {
   return { ok: true };
 }
 
-async function main() {
-  const { db } = initFirebaseAdmin();
-  const periodId = utcYearMonth();
-  const stats = await readParserStats(db, periodId);
-  let queueRemainingBl = null;
+async function countSafe(query) {
   try {
-    const meta = await readMonthQueueMeta(db, periodId, "bricklink");
-    if (meta) queueRemainingBl = Number(meta.remaining);
+    return Number((await query.count().get()).data().count) || 0;
+  } catch (e) {
+    console.warn("count failed:", e && e.message ? e.message : e);
+    return null;
+  }
+}
+
+async function readCatalogByType(db) {
+  const out = {};
+  for (const [type] of REPORT_TYPES) {
+    if (type === "OTHER") continue;
+    out[type] = await countSafe(db.collection("catalog_items").where("itemType", "==", type));
+  }
+  return out;
+}
+
+async function readQueueState(db, periodId, source) {
+  let remaining = null;
+  try {
+    const meta = await readMonthQueueMeta(db, periodId, source);
+    if (meta && Number.isFinite(Number(meta.remaining))) remaining = Number(meta.remaining);
   } catch (e) {
     console.warn("queue meta read failed:", e && e.message ? e.message : e);
   }
+  const retry = await countSafe(queueRef(db, periodId, source).collection("errors"));
+  return { remaining, retry };
+}
+
+async function main() {
+  const { db } = initFirebaseAdmin();
+  const now = new Date();
+  const dayId = reportDayId(now);
+  const periodId = utcYearMonth(new Date(`${dayId}T12:00:00Z`));
+  const stats = await readParserStats(db, periodId);
+  const [catalogByType, blQueue, owlQueue] = await Promise.all([
+    readCatalogByType(db),
+    readQueueState(db, periodId, "bricklink"),
+    readQueueState(db, periodId, "brickowl"),
+  ]);
   const text = buildDailyReportText(stats, {
-    queueRemainingBl,
+    dayId,
+    catalogByType,
+    queues: { bricklink: blQueue, brickowl: owlQueue },
     runUrl: process.env.GITHUB_RUN_URL || "",
   });
   console.log("\n--- daily parser report ---\n" + text + "\n");
@@ -211,6 +290,7 @@ async function main() {
       "utf8"
     );
   }
+  if (process.env.REPORT_NO_SEND === "1") return;
   const tg = await sendTelegram(text);
   if (!tg.ok && tg.reason === "no_telegram_secrets") process.exitCode = 0;
   else if (!tg.ok) process.exitCode = 1;
@@ -218,11 +298,10 @@ async function main() {
 
 module.exports = {
   buildDailyReportText,
-  formatSourceBlock,
+  formatMonthBlock,
   buildVerdict,
-  successMark,
-  SUCCESS_PCT_TARGET,
-  WARN_PCT,
+  reportDayId,
+  daysLeftInMonth,
 };
 
 if (require.main === module) {
