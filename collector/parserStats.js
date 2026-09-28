@@ -10,7 +10,7 @@
  *     days.{YYYY-MM-DD}: { requested, gotPrice, empty, errors, softBlocked } — история по дням Еревана
  *   }
  *
- * «Ответ за месяц» помечается на корне observation (statsAnswerPeriod / statsAnswerKind),
+ * «Ответ за месяц» помечается в parser_month_answers/{period}__{source}__{id},
  * чтобы повторный съём той же позиции не считался второй раз.
  *
  * День отчёта — календарный день Asia/Yerevan (как Telegram в 23:59).
@@ -20,6 +20,7 @@
 const { utcYearMonth } = require("./gapLedger");
 
 const STATS_COLL = "system_stats";
+const ANSWERS_COLL = "parser_month_answers";
 const REPORT_TZ = "Asia/Yerevan";
 const SOURCES = ["bricklink", "brickowl"];
 const STAT_TYPES = ["SET", "MINIFIG", "GEAR", "OTHER"];
@@ -133,23 +134,21 @@ function createStatsAccumulator() {
 }
 
 /**
- * Прошлый ответ позиции в этом месяце (по данным корня observation, без лишнего чтения,
- * если корень уже прочитан — передай его data).
- * @returns {null|"priced"|"empty"}
+ * Пометки «ответ за месяц» — отдельная коллекция: запись в корень observation
+ * запускает пересчёт оценки (триггер) и перечитывает всю историю позиции.
  */
-function prevAnswerFromObservation(data, periodId) {
-  if (!data || String(data.statsAnswerPeriod || "") !== String(periodId)) return null;
-  const k = String(data.statsAnswerKind || "");
-  return k === "priced" || k === "empty" ? k : null;
+function answerRef(db, catalogItemId, source, periodId) {
+  return db
+    .collection(ANSWERS_COLL)
+    .doc(`${periodId}__${normalizeSource(source)}__${String(catalogItemId)}`);
 }
 
+/** @returns {Promise<null|"priced"|"empty">} */
 async function readMonthAnswer(db, catalogItemId, source, periodId) {
-  const { observationDocId } = require("./catalogFields");
-  const snap = await db
-    .collection("market_observations")
-    .doc(observationDocId(catalogItemId, normalizeSource(source)))
-    .get();
-  return prevAnswerFromObservation(snap.exists ? snap.data() : null, periodId);
+  const snap = await answerRef(db, catalogItemId, source, periodId).get();
+  if (!snap.exists) return null;
+  const k = String((snap.data() || {}).kind || "");
+  return k === "priced" || k === "empty" ? k : null;
 }
 
 /** Сколько добавить в «разные позиции с ответом»: первый ответ или пусто → цена. */
@@ -165,11 +164,7 @@ function answerDelta(prevKind, kind) {
 }
 
 async function markMonthAnswer(db, catalogItemId, source, periodId, kind) {
-  const { observationDocId } = require("./catalogFields");
-  await db
-    .collection("market_observations")
-    .doc(observationDocId(catalogItemId, normalizeSource(source)))
-    .set({ statsAnswerPeriod: String(periodId), statsAnswerKind: kind }, { merge: true });
+  await answerRef(db, catalogItemId, source, periodId).set({ kind });
 }
 
 /** Прочитать прошлый ответ → посчитать дельту → пометить корень (1 чтение + ≤1 запись). */
@@ -363,7 +358,6 @@ module.exports = {
   normalizeSource,
   rollDayIfNeeded,
   createStatsAccumulator,
-  prevAnswerFromObservation,
   readMonthAnswer,
   answerDelta,
   markMonthAnswer,

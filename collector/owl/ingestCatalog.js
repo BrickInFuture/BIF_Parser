@@ -21,7 +21,6 @@ const {
 const {
   bumpParserStats,
   createStatsAccumulator,
-  prevAnswerFromObservation,
   trackMonthAnswer,
 } = require("../parserStats");
 const { setNoFromCatalogItemId } = require("./boUrls");
@@ -201,7 +200,6 @@ async function main() {
 
     let cachedOwlItemId = null;
     let cachedBoid = null;
-    let prevAnswer = null;
     try {
       const snap = await db
         .collection("market_observations")
@@ -211,7 +209,6 @@ async function main() {
         const d = snap.data() || {};
         cachedOwlItemId = d.owlItemId ? String(d.owlItemId) : null;
         cachedBoid = d.boid ? String(d.boid) : null;
-        prevAnswer = prevAnswerFromObservation(d, queuePeriodId);
       }
     } catch {
       //
@@ -270,7 +267,6 @@ async function main() {
           source: "brickowl",
           periodId: queuePeriodId,
           kind: "empty",
-          prevKind: prevAnswer,
         });
         try {
           await clearMonthQueueError(db, queuePeriodId, catalogItemId, "brickowl");
@@ -376,7 +372,6 @@ async function main() {
       source: "brickowl",
       periodId: queuePeriodId,
       kind: answerKind,
-      prevKind: prevAnswer,
     });
     if (answer.priced > 0) uniquePriced += 1;
     processed += 1;
