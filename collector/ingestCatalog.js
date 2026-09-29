@@ -732,6 +732,12 @@ async function main() {
   }
 
   function applyClusterAfterSoft(cat) {
+    // Fresh proxy IP already answered this soft-block: no heat wave to cool or jump past.
+    if (session.lastSoftRotated) {
+      noteClusterOk();
+      mixedSoftBases.clear();
+      return { base: catalogBaseKey(cat.itemType, cat.itemNumber), jump: false, mixedCircuit: false };
+    }
     const cluster = noteClusterSoft(cat);
     if (cluster.jump) {
       skipBaseKey = cluster.base;
@@ -1882,6 +1888,7 @@ async function main() {
     avgSecOk,
     avgSecSoft,
     circuitTrips: session.circuitTrips || 0,
+    proxyRotations: session.proxyRotations || 0,
     circuitOpen: session.isCircuitOpen(),
     circuitOpenThisWindow,
     skipBaseKey,

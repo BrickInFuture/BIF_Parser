@@ -59,6 +59,32 @@ function circuitCoolRange() {
   ];
 }
 
+/** Sticky gateway: each port in this range holds its own residential IP. */
+function proxyPortRange() {
+  const m = String(process.env.BL_PROXY_PORT_RANGE || "10000-20000").match(/^\s*(\d+)\s*-\s*(\d+)\s*$/);
+  if (!m) return null;
+  const lo = Number(m[1]);
+  const hi = Number(m[2]);
+  return hi > lo ? [lo, hi] : null;
+}
+
+/** Max IP swaps per window; past it soft-blocks fall back to cool/circuit. */
+const PROXY_MAX_ROTATIONS = Math.max(0, Number(process.env.BL_PROXY_MAX_ROTATIONS ?? 40) || 0);
+
+/** Same proxy URL with another sticky port, or null when rotation does not apply. */
+function withRandomProxyPort(raw) {
+  if (process.env.BL_PROXY_ROTATE === "0") return null;
+  const range = proxyPortRange();
+  const src = String(raw || "").trim();
+  const m = src.match(/:(\d{2,5})(\/?)$/);
+  if (!range || !m) return null;
+  const port = Number(m[1]);
+  if (port < range[0] || port > range[1]) return null;
+  let next = port;
+  while (next === port) next = range[0] + Math.floor(Math.random() * (range[1] - range[0] + 1));
+  return `${src.slice(0, m.index)}:${next}${m[2]}`;
+}
+
 /** When true, circuit cools then continues; when false, stopRequested kills the window. */
 function circuitCoolAndContinue() {
   if (process.env.BL_CIRCUIT_STOP === "1") return false;
@@ -328,6 +354,9 @@ class CollectorSession {
     this.consecutiveSoftBlocks = 0;
     this.circuitOpen = false;
     this.circuitTrips = 0;
+    this.proxyRotations = 0;
+    /** Last soft-block was answered with a fresh proxy IP (streak counters are moot). */
+    this.lastSoftRotated = false;
     /** When true, ingest loops should stop the time window instead of waiting out circuit cool. */
     this.stopRequested = false;
     /** Cached aws-waf-token cookie jar for plain HTTP fetches. */
@@ -551,6 +580,33 @@ class CollectorSession {
     await this.warmUp();
   }
 
+  /** Soft-block on a sticky proxy: move to a new IP and re-warm instead of cooling the burnt one. */
+  async #rotateProxyAfterSoft() {
+    if (this.proxyRotations >= PROXY_MAX_ROTATIONS) return 0;
+    const next = withRandomProxyPort(this.proxyUrl);
+    if (!next) return 0;
+    this.proxyRotations += 1;
+    this.proxyUrl = next;
+    const ms = randomInRange(2000, 4000);
+    console.log(
+      JSON.stringify({
+        step: "proxy_rotate",
+        rotations: this.proxyRotations,
+        port: Number(next.match(/:(\d+)\/?$/)[1]),
+        coolMs: ms,
+      })
+    );
+    await sleep(ms);
+    if (this.page) {
+      try {
+        await this.#hardRestartBrowser();
+      } catch (e) {
+        console.warn("proxy rotate rewarm failed:", e && e.message ? e.message : e);
+      }
+    }
+    return ms;
+  }
+
   /**
    * After scrape fails: soft_block cools the IP (continue window) unless BL_CIRCUIT_STOP=1;
    * hard WAF keeps short rewarm backoff.
@@ -558,6 +614,7 @@ class CollectorSession {
    * @param {{ softBlocked?: boolean, hardWaf?: boolean }=} meta
    */
   async noteFetchOutcome(ok, meta = {}) {
+    this.lastSoftRotated = false;
     if (ok) {
       this.consecutiveFails = 0;
       this.consecutiveSoftBlocks = 0;
@@ -570,6 +627,12 @@ class CollectorSession {
     this.consecutiveFails += 1;
 
     if (meta.softBlocked) {
+      const rotateMs = await this.#rotateProxyAfterSoft();
+      if (rotateMs) {
+        this.lastSoftRotated = true;
+        this.consecutiveSoftBlocks = 0;
+        return rotateMs;
+      }
       this.consecutiveSoftBlocks += 1;
       // Всегда чуть остыть после soft — иначе бьём IP с паузой 1–2с и ловим волну.
       const softCoolMs = await this.#softBlockCool();
