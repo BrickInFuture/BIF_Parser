@@ -17,13 +17,31 @@ function normalizeProxyInput(raw) {
   return s;
 }
 
+/**
+ * Price Guide renders in the exit IP's local currency and we only parse USD,
+ * so a residential gateway without an explicit country gets pinned to BL_PROXY_COUNTRY (default us).
+ */
+function pinProxyCountry(u) {
+  const country = String(process.env.BL_PROXY_COUNTRY ?? "us").trim().toLowerCase();
+  if (!country || country === "0" || !u.username) return;
+  if (!/(^|\.)dataimpulse\.com$/i.test(u.hostname)) return;
+  const user = decodeURIComponent(u.username);
+  if (/__cr\./i.test(user)) return;
+  const semi = user.indexOf(";");
+  const next = semi >= 0
+    ? `${user.slice(0, semi)}__cr.${country}${user.slice(semi)}`
+    : `${user}__cr.${country}`;
+  u.username = encodeURIComponent(next);
+}
+
 function parseProxyUrl(raw) {
   const s = normalizeProxyInput(raw);
   if (!s) return null;
   try {
-    const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(s) ? s : `http://${s}`;
-    const u = new URL(withScheme);
+    const u = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(s) ? s : `http://${s}`);
     if (!u.hostname) return null;
+    pinProxyCountry(u);
+    const withScheme = u.href.replace(/\/$/, "");
     const port = u.port ? `:${u.port}` : "";
     const out = { server: `${u.protocol}//${u.hostname}${port}`, href: withScheme };
     if (u.username) out.username = decodeURIComponent(u.username);

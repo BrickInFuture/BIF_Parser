@@ -391,6 +391,7 @@ class CollectorSession {
           step: "proxy_enabled",
           server: proxy.server,
           hasAuth: Boolean(proxy.username),
+          country: (String(proxy.username || "").match(/__cr\.([a-z]{2})/i) || [])[1] || null,
         })
       );
     }
