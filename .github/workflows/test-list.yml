@@ -1,0 +1,60 @@
+# One-off: fixed list collector/test-list.txt, no proxy, own Telegram report.
+
+name: BIF test list
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: bif-collector-public
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DEV_PROJECT_ID: brickinfuture-306f1
+      BL_RAW_ONLY: "1"
+      BL_PARSE_TIMEOUT_MS: "90000"
+      BL_PAUSE_MS: "2000,4000"
+      BL_SOFT_BLOCK_FAST_MS: "3000"
+      BL_CIRCUIT_SOFT_LIMIT: "5"
+      BL_CIRCUIT_STOP: "0"
+      BL_CIRCUIT_COOL_MIN_MS: "90000"
+      BL_CIRCUIT_COOL_MAX_MS: "150000"
+      BL_ADAPTIVE_PAUSE: "0"
+      BL_HTTP_FETCH: "1"
+      BL_HTTP_429_RETRIES: "1"
+      BL_HTTP_429_MIN_MS: "15000"
+      BL_HTTP_429_MAX_MS: "30000"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - run: npm install
+      - name: Install Playwright Chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+      - name: Playwright Chromium (from cache)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: npx playwright install chromium
+      - name: Write service account
+        env:
+          FIREBASE_SERVICE_ACCOUNT_DEV: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_DEV }}
+        run: |
+          echo "$FIREBASE_SERVICE_ACCOUNT_DEV" > "$RUNNER_TEMP/sa.json"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
+      - name: Test list (no proxy)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node collector/testList.js
