@@ -75,6 +75,9 @@ const PROXY_MAX_ROTATIONS = Math.max(0, Number(process.env.BL_PROXY_MAX_ROTATION
 /** One soft-block is usually the item itself (swapping IP just burns a warm-up); a streak means the IP. */
 const PROXY_ROTATE_AFTER_SOFT = Math.max(1, Number(process.env.BL_PROXY_ROTATE_AFTER_SOFT) || 2);
 
+/** Swap IP after N clean pages, before the site starts cutting it (0 = only on soft-block). */
+const PROXY_ROTATE_EVERY = Math.max(0, Number(process.env.BL_PROXY_ROTATE_EVERY) || 0);
+
 /**
  * Homepage ≈ 5.4 MB (banners, fonts); a Price Guide page ≈ 0.4 MB and still issues the WAF token.
  * On paid proxy traffic warm on the light page.
@@ -101,6 +104,22 @@ function withRandomProxyPort(raw) {
   let next = port;
   while (next === port) next = range[0] + Math.floor(Math.random() * (range[1] - range[0] + 1));
   return `${src.slice(0, m.index)}:${next}${m[2]}`;
+}
+
+/**
+ * Parallel bursts get their own BL_PROXY_PORT_RANGE slice: start on a random port inside it,
+ * otherwise every shard begins on the secret's port and rotation refuses an out-of-range port.
+ */
+function startPortInOwnRange(raw) {
+  const src = String(raw || "").trim();
+  if (!String(process.env.BL_PROXY_PORT_RANGE || "").trim() || process.env.BL_PROXY_ROTATE === "0") {
+    return src;
+  }
+  const range = proxyPortRange();
+  const m = src.match(/:(\d{2,5})(\/?)$/);
+  if (!range || !m) return src;
+  const port = range[0] + Math.floor(Math.random() * (range[1] - range[0] + 1));
+  return `${src.slice(0, m.index)}:${port}${m[2]}`;
 }
 
 /** When true, circuit cools then continues; when false, stopRequested kills the window. */
@@ -362,7 +381,9 @@ class CollectorSession {
     this.basePauseMax = pause[1];
     this.pauseMin = pause[0];
     this.pauseMax = pause[1];
-    this.proxyUrl = opts.proxyUrl != null ? opts.proxyUrl : process.env.BL_PROXY_URL || "";
+    this.proxyUrl = startPortInOwnRange(
+      opts.proxyUrl != null ? opts.proxyUrl : process.env.BL_PROXY_URL || ""
+    );
     this.browser = null;
     this.context = null;
     this.page = null;
@@ -373,6 +394,7 @@ class CollectorSession {
     this.circuitOpen = false;
     this.circuitTrips = 0;
     this.proxyRotations = 0;
+    this.okSinceRotate = 0;
     this.profileDir = path.join(os.tmpdir(), `bif-bl-profile-${process.pid}`);
     this.warmups = 0;
     this.warmBytes = 0;
@@ -648,13 +670,14 @@ class CollectorSession {
   }
 
   /** Soft-block on a sticky proxy: move to a new IP and re-warm instead of cooling the burnt one. */
-  async #rotateProxyAfterSoft() {
+  async #rotateProxyAfterSoft(planned = false) {
     if (this.proxyRotations >= PROXY_MAX_ROTATIONS) return 0;
     const next = withRandomProxyPort(this.proxyUrl);
     if (!next) return 0;
     this.proxyRotations += 1;
+    this.okSinceRotate = 0;
     this.proxyUrl = next;
-    const ms = randomInRange(2000, 4000);
+    const ms = planned ? 0 : randomInRange(2000, 4000);
     console.log(
       JSON.stringify({
         step: "proxy_rotate",
@@ -688,6 +711,10 @@ class CollectorSession {
       this.circuitOpen = false;
       this.stopRequested = false;
       this.#shrinkPauseAfterSuccess();
+      this.okSinceRotate += 1;
+      if (PROXY_ROTATE_EVERY > 0 && this.okSinceRotate >= PROXY_ROTATE_EVERY) {
+        await this.#rotateProxyAfterSoft(true);
+      }
       return 0;
     }
     this.#expandPauseAfterBlock();

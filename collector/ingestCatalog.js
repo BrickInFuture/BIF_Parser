@@ -136,6 +136,8 @@ const GAP_MAX_SCAN = Math.max(200, Number(process.env.BL_GAP_MAX_SCAN) || 1000);
  * Вкл: BL_MONTH_QUEUE=1 (публичный парсер). Выкл → старый gap/sweep.
  */
 const MONTH_QUEUE = process.env.BL_MONTH_QUEUE === "1";
+/** On a proxy the soft-blocked item gets one more try on the fresh IP in this burst, not a ~3 h defer. */
+const SOFT_RETRY_INLINE = process.env.BL_SOFT_RETRY_INLINE === "1";
 const MONTH_QUEUE_ERROR_BUDGET = Math.max(
   0,
   Number(process.env.BL_MONTH_QUEUE_ERROR_BUDGET) || 0
@@ -460,6 +462,34 @@ async function main() {
         softCount: Number(run.data.timingStats?.softCount) || 0,
         softTotalMs: Number(run.data.timingStats?.softTotalMs) || 0,
       };
+  // Parallel bursts share one run doc: write deltas as increments, not absolute totals.
+  const savedCounters = {
+    processed, ok, fail, skipped, okWithPrices, noData,
+    errorTagCounts: { ...errorTagCounts },
+    timingStats: { ...timingStats },
+  };
+  function runCounterFields() {
+    const now = {
+      processed, ok, fail, skipped, okWithPrices, noData,
+      errorTagCounts: { ...errorTagCounts },
+      timingStats: { ...timingStats },
+    };
+    if (RESET_RUN) return now;
+    const inc = (a, b) => FieldValue.increment((Number(a) || 0) - (Number(b) || 0));
+    const out = {};
+    for (const k of ["processed", "ok", "fail", "skipped", "okWithPrices", "noData"]) {
+      out[k] = inc(now[k], savedCounters[k]);
+    }
+    for (const map of ["errorTagCounts", "timingStats"]) {
+      out[map] = {};
+      for (const k of Object.keys(now[map])) {
+        out[map][k] = inc(now[map][k], savedCounters[map][k]);
+      }
+    }
+    Object.assign(savedCounters, now);
+    return out;
+  }
+
   let chunkDone = 0;
   let chunkOkWithPrices = 0;
   let chunkNoData = 0;
@@ -876,15 +906,8 @@ async function main() {
         ...(gapSweepState ? { gapSweep: gapSweepState.byType } : {}),
         cursorItemNumber,
         cursorCatalogId,
-        processed,
-        ok,
-        fail,
-        skipped,
-        okWithPrices,
-        noData,
+        ...runCounterFields(),
         lastError,
-        errorTagCounts,
-        timingStats,
         circuitTrips: session.circuitTrips || 0,
         circuitOpenThisWindow,
         shardIndex: SHARD_INDEX,
@@ -1394,7 +1417,8 @@ async function main() {
         if (!pendingItems.length) continue;
       }
 
-      const { cat, source } = pendingItems.shift();
+      const item = pendingItems.shift();
+      const { cat, source } = item;
       if (stopWindow || chunkDone >= LIMIT || Date.now() >= deadlineMs) break;
 
       if (source === "cursor") {
@@ -1631,6 +1655,12 @@ async function main() {
           lastError = scrape.parsed?.error || scrape.waitError || "parse_failed";
           console.error(`FAIL ${fetchNo}:`, lastError);
           const softFail = isSoftBlockTag(scrape.errorTag, lastError);
+          if (softFail && SOFT_RETRY_INLINE && session.proxyUrl && !item.softRetried) {
+            pendingItems.push({ ...item, softRetried: true });
+            noteErrorTag(scrape.errorTag);
+            console.log(JSON.stringify({ step: "soft_retry_inline", setNo: fetchNo, pending: pendingItems.length }));
+            continue;
+          }
           // Soft-block — не «ошибка в хвост месяца»; отдельный счётчик softBlocked.
           if (!softFail) {
             fail += 1;
@@ -1797,14 +1827,7 @@ async function main() {
         ...(gapSweepState ? { gapSweep: gapSweepState.byType } : {}),
         cursorItemNumber,
         cursorCatalogId,
-        processed,
-        ok,
-        fail,
-        skipped,
-        okWithPrices,
-        noData,
-        errorTagCounts,
-        timingStats,
+        ...runCounterFields(),
         circuitTrips: session.circuitTrips || 0,
         circuitOpenThisWindow,
         lastError: circuitOpenThisWindow

@@ -505,6 +505,26 @@ function isDeadCatalogPage(raw, title) {
 /**
  * True for WAF / soft-block pages (not a usable Price Guide body).
  */
+/**
+ * Real Price Guide of an item with no sales and no stock: full page chrome
+ * (breadcrumb, sort/currency controls, wanted-list link) but no tables at all.
+ * Reproduces from a fresh home IP too, so it is not anti-bot (2026-09-29, ~16 KB).
+ */
+function looksNoSalesPriceGuide(title, raw) {
+  const s = String(raw || "");
+  if (!/Price Guide\s*-\s*\w/i.test(String(title || ""))) return false;
+  if (/Oops|Sorry!|BrickLink\s+Error/i.test(String(title || ""))) return false;
+  if (hasPriceGuideContent(s)) return false;
+  if (/id=["']challenge-container["']|\bcaptcha\b|Access\s*Denied|Request\s+blocked/i.test(s)) {
+    return false;
+  }
+  return (
+    /Group\s*by\s*Currency/i.test(s) &&
+    /Add\s+to\s+My\s+Wanted\s+List/i.test(s) &&
+    /catalog\.asp/i.test(s)
+  );
+}
+
 function isWafChallengePage(html) {
   const raw = String(html || "");
   if (!raw) return true;
@@ -537,6 +557,8 @@ function isWafChallengePage(html) {
     if (hasPriceGuideContent(raw)) return false;
     return true;
   }
+
+  if (looksNoSalesPriceGuide(title, raw)) return false;
 
   // Soft-block: Set/Minifig title with no sales chrome (classic anti-bot shell).
   // Broad "market Price Guide" matched Gear/Parts empty markets too — those are no_data.
@@ -925,6 +947,13 @@ function parseCatalogPgHtml(html) {
     return result;
   }
 
+  if (looksNoSalesPriceGuide(title, raw)) {
+    result.ok = true;
+    result.empty = true;
+    result.error = null;
+    return result;
+  }
+
   // Gear/Parts: только явный пустой рынок → no_data.
   // Тонкий shell без маркеров пустоты — soft-block (иначе блок сайта хороним как «пусто навсегда»).
   if (
@@ -1053,6 +1082,7 @@ module.exports = {
   errorLooksLikeSoftBlock,
   isDeadCatalogPage,
   isWafChallengePage,
+  looksNoSalesPriceGuide,
   isPriceGuideShell,
   looksEmptyPriceGuide,
   extractSummaryHtml,

@@ -24,9 +24,13 @@ on:
         required: false
         default: "bl"
       limit:
-        description: "BL items per burst"
+        description: "BL items per burst (per shard)"
         required: false
         default: "400"
+      shards:
+        description: "Parallel BL bursts, each on its own proxy port slice (1-8)"
+        required: false
+        default: "8"
       owlLimit:
         description: "Owl items per burst (soft default 30)"
         required: false
@@ -47,6 +51,7 @@ jobs:
       go: ${{ steps.check.outputs.go }}
       mode: ${{ steps.check.outputs.mode }}
       sources: ${{ steps.check.outputs.sources }}
+      shards: ${{ steps.check.outputs.shards }}
     steps:
       - name: Gate
         id: check
@@ -55,10 +60,15 @@ jobs:
           d=$((10#$d))
           mode="${{ github.event.inputs.mode || 'burst' }}"
           sources="${{ github.event.inputs.sources || 'bl' }}"
+          n="${{ github.event.inputs.shards || '8' }}"
+          n=$((10#$n))
+          if [ "$sources" != "bl" ] || [ "$n" -lt 1 ]; then n=1; fi
+          if [ "$n" -gt 8 ]; then n=8; fi
           if [ "${{ github.event.schedule }}" = "0 23 30 9 *" ]; then mode="month_end"; fi
-          echo "UTC day=$d mode=$mode sources=$sources"
+          echo "UTC day=$d mode=$mode sources=$sources shards=$n"
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
           echo "sources=$sources" >> "$GITHUB_OUTPUT"
+          echo "shards=[$(seq -s, 1 $n)]" >> "$GITHUB_OUTPUT"
           if [ "${{ github.event_name }}" = "schedule" ] && [ "$(date -u +%Y-%m)" != "2026-09" ]; then
             echo "go=false" >> "$GITHUB_OUTPUT"
             echo "GitHub cron is only for the Sep 2026 tail"
@@ -148,15 +158,20 @@ jobs:
     if: needs.gate.outputs.go == 'true' && needs.gate.outputs.mode == 'burst'
     runs-on: ubuntu-latest
     timeout-minutes: 55
-    permissions:
-      contents: read
-      actions: write
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.gate.outputs.shards) }}
     env:
       DEV_PROJECT_ID: brickinfuture-306f1
       BL_RAW_ONLY: "1"
       BO_SKIP_BIF: "1"
       BL_PARSE_TIMEOUT_MS: "90000"
       BL_PAUSE_MS: "1000,2000"
+      BL_PROXY_ROTATE_AFTER_SOFT: "1"
+      BL_PROXY_MAX_ROTATIONS: "200"
+      BL_PROXY_ROTATE_EVERY: "0"
+      BL_SOFT_RETRY_INLINE: "1"
       BL_SOFT_BLOCK_FAST_MS: "3000"
       BL_CIRCUIT_SOFT_LIMIT: "5"
       BL_CIRCUIT_STOP: "0"
@@ -204,6 +219,11 @@ jobs:
         run: |
           echo "$FIREBASE_SERVICE_ACCOUNT_DEV" > "$RUNNER_TEMP/sa.json"
           echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
+      - name: Proxy port slice for this shard
+        if: needs.gate.outputs.shards != '[1]'
+        run: |
+          lo=$((10000 + (${{ matrix.shard }} - 1) * 1250))
+          echo "BL_PROXY_PORT_RANGE=$lo-$((lo + 1249))" >> "$GITHUB_ENV"
       - name: BrickLink burst
         if: needs.gate.outputs.sources == 'bl' || needs.gate.outputs.sources == 'both' || needs.gate.outputs.sources == ''
         env:
@@ -217,18 +237,25 @@ jobs:
           BO_LIMIT: ${{ github.event.inputs.owlLimit || '30' }}
         run: npm run ingest:owl -- --confirm --limit="${{ github.event.inputs.owlLimit || '30' }}" --maxMinutes=20
       - name: User refresh queue
-        if: success() && (needs.gate.outputs.sources == 'bl' || needs.gate.outputs.sources == 'both' || needs.gate.outputs.sources == '')
+        if: success() && matrix.shard == 1 && (needs.gate.outputs.sources == 'bl' || needs.gate.outputs.sources == 'both' || needs.gate.outputs.sources == '')
         continue-on-error: true
         run: npm run ingest:queue -- --confirm --limit=15 --maxMinutes=8
+
+  chain:
+    needs: [gate, ingest]
+    if: always() && !cancelled() && needs.gate.outputs.go == 'true' && needs.gate.outputs.mode == 'burst' && needs.gate.outputs.sources == 'bl'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
       - name: Chain next BL burst (Sep 29-30 only)
-        if: always() && needs.gate.outputs.sources == 'bl' && !cancelled()
-        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           day=$(date -u +%Y-%m-%d)
           if [ "$day" = "2026-09-29" ] || [ "$day" = "2026-09-30" ]; then
-            gh workflow run "BIF collector" --repo "${{ github.repository }}" -f mode=burst -f sources=bl -f reason=chain
+            gh workflow run "BIF collector" --repo "${{ github.repository }}" -f mode=burst -f sources=bl -f reason=chain -f shards="${{ github.event.inputs.shards || '8' }}"
           fi
 
   error_tail:
