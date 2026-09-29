@@ -173,24 +173,14 @@ function defaultPauseMs() {
 
 /**
  * Playwright proxy from BL_PROXY_URL / opts.proxyUrl.
- * Supports http(s)://user:pass@host:port and host:port.
+ * Supports http(s)://user:pass@host:port, host:port and host:port:user:pass.
  * @returns {{ server: string, username?: string, password?: string } | null}
  */
 function parseProxyUrl(raw) {
-  const s = String(raw || "").trim();
-  if (!s) return null;
-  try {
-    const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(s) ? s : `http://${s}`;
-    const u = new URL(withScheme);
-    if (!u.hostname) return null;
-    const port = u.port ? `:${u.port}` : "";
-    const out = { server: `${u.protocol}//${u.hostname}${port}` };
-    if (u.username) out.username = decodeURIComponent(u.username);
-    if (u.password) out.password = decodeURIComponent(u.password);
-    return out;
-  } catch {
-    return null;
-  }
+  const shared = parseProxyUrlShared(raw);
+  if (!shared) return null;
+  const { href, ...out } = shared;
+  return out;
 }
 
 function isSoftBlockedResult(result) {

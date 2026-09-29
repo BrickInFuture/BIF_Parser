@@ -5,8 +5,20 @@
  */
 "use strict";
 
+/** Accepts provider "host:port:user:pass" and bare "user:pass@host:port" besides full URLs. */
+function normalizeProxyInput(raw) {
+  const s = String(raw || "").trim().replace(/^["']|["']$/g, "");
+  if (!s || /^[a-z][a-z0-9+.-]*:\/\//i.test(s)) return s;
+  const parts = s.split(":");
+  if (parts.length >= 4 && /^\d+$/.test(parts[1])) {
+    const [host, port, user, ...pass] = parts;
+    return `http://${encodeURIComponent(user)}:${encodeURIComponent(pass.join(":"))}@${host}:${port}`;
+  }
+  return s;
+}
+
 function parseProxyUrl(raw) {
-  const s = String(raw || "").trim();
+  const s = normalizeProxyInput(raw);
   if (!s) return null;
   try {
     const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(s) ? s : `http://${s}`;
@@ -62,6 +74,7 @@ async function fetchViaProxy(url, opts = {}) {
 }
 
 module.exports = {
+  normalizeProxyInput,
   parseProxyUrl,
   proxyEnvUrl,
   getProxyDispatcher,

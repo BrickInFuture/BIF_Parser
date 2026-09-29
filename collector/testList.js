@@ -8,7 +8,7 @@ if (!USE_PROXY) delete process.env.BL_PROXY_URL;
 const PROXY_URL = USE_PROXY ? String(process.env.BL_PROXY_URL || "").trim() : "";
 
 const { initFirebaseAdmin } = require("./firebaseAdmin");
-const { fetchViaProxy } = require("./httpProxy");
+const { fetchViaProxy, parseProxyUrl } = require("./httpProxy");
 const { CollectorSession } = require("./session");
 const { writeObservationFromParse } = require("./observationWriter");
 const { resolveMarketFetch } = require("./blUrls");
@@ -60,8 +60,21 @@ async function exitIp() {
 
 async function main() {
   if (USE_PROXY && !PROXY_URL) throw new Error("BL_PROXY_URL пустой");
+  if (USE_PROXY && !parseProxyUrl(PROXY_URL)) {
+    const shape = `схема=${/^[a-z]+:\/\//i.test(PROXY_URL) ? "да" : "нет"}, двоеточий=${(PROXY_URL.match(/:/g) || []).length}, @=${PROXY_URL.includes("@") ? "да" : "нет"}, длина=${PROXY_URL.length}`;
+    throw new Error(`строка прокси не разбирается (${shape})`);
+  }
   const list = readList();
   const ipBefore = await exitIp();
+  if (USE_PROXY) {
+    let directIp = "";
+    try {
+      directIp = (await (await fetch("https://api.ipify.org")).text()).trim();
+    } catch {}
+    if (!ipBefore || ipBefore.startsWith("не узнал") || ipBefore === directIp) {
+      throw new Error(`прокси не включился: IP через прокси ${ipBefore || "?"}, IP GitHub ${directIp || "?"}`);
+    }
+  }
   const started = Date.now();
   const stats = { total: list.length, withPrice: 0, empty: 0, soft: 0, waf: 0, other: 0, skipped: 0 };
   const failed = [];
