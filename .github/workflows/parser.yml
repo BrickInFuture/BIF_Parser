@@ -28,9 +28,9 @@ on:
         required: false
         default: "400"
       shards:
-        description: "Parallel BL bursts, each on its own proxy port slice (1-8)"
+        description: "Parallel BL bursts, each on its own proxy port slice (1-10)"
         required: false
-        default: "8"
+        default: "10"
       owlLimit:
         description: "Owl items per burst (soft default 30)"
         required: false
@@ -60,10 +60,10 @@ jobs:
           d=$((10#$d))
           mode="${{ github.event.inputs.mode || 'burst' }}"
           sources="${{ github.event.inputs.sources || 'bl' }}"
-          n="${{ github.event.inputs.shards || '8' }}"
+          n="${{ github.event.inputs.shards || '10' }}"
           n=$((10#$n))
           if [ "$sources" != "bl" ] || [ "$n" -lt 1 ]; then n=1; fi
-          if [ "$n" -gt 8 ]; then n=8; fi
+          if [ "$n" -gt 10 ]; then n=10; fi
           if [ "${{ github.event.schedule }}" = "0 23 30 9 *" ]; then mode="month_end"; fi
           echo "UTC day=$d mode=$mode sources=$sources shards=$n"
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
@@ -222,8 +222,8 @@ jobs:
       - name: Proxy port slice for this shard
         if: needs.gate.outputs.shards != '[1]'
         run: |
-          lo=$((10000 + (${{ matrix.shard }} - 1) * 1250))
-          echo "BL_PROXY_PORT_RANGE=$lo-$((lo + 1249))" >> "$GITHUB_ENV"
+          lo=$((10000 + (${{ matrix.shard }} - 1) * 1000))
+          echo "BL_PROXY_PORT_RANGE=$lo-$((lo + 999))" >> "$GITHUB_ENV"
       - name: BrickLink burst
         if: needs.gate.outputs.sources == 'bl' || needs.gate.outputs.sources == 'both' || needs.gate.outputs.sources == ''
         env:
@@ -255,7 +255,7 @@ jobs:
         run: |
           day=$(date -u +%Y-%m-%d)
           if [ "$day" = "2026-09-29" ] || [ "$day" = "2026-09-30" ]; then
-            gh workflow run "BIF collector" --repo "${{ github.repository }}" -f mode=burst -f sources=bl -f reason=chain -f shards="${{ github.event.inputs.shards || '8' }}"
+            gh workflow run "BIF collector" --repo "${{ github.repository }}" -f mode=burst -f sources=bl -f reason=chain -f shards="${{ github.event.inputs.shards || '10' }}"
           fi
 
   error_tail:
