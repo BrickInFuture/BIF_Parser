@@ -1,9 +1,14 @@
-# One-off: fixed list collector/test-list.txt, no proxy, own Telegram report.
+# One-off: fixed list collector/test-list.txt, own Telegram report. Proxy only when proxy=1.
 
 name: BIF test list
 
 on:
   workflow_dispatch:
+    inputs:
+      proxy:
+        description: "1 = through BL_PROXY_URL, 0 = no proxy"
+        required: false
+        default: "0"
 
 concurrency:
   group: bif-collector-public
@@ -52,8 +57,10 @@ jobs:
         run: |
           echo "$FIREBASE_SERVICE_ACCOUNT_DEV" > "$RUNNER_TEMP/sa.json"
           echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
-      - name: Test list (no proxy)
+      - name: Test list
         env:
+          TEST_USE_PROXY: ${{ github.event.inputs.proxy || '0' }}
+          BL_PROXY_URL: ${{ github.event.inputs.proxy == '1' && secrets.BL_PROXY_URL || '' }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

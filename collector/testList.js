@@ -3,9 +3,12 @@
 const fs = require("fs");
 const path = require("path");
 
-delete process.env.BL_PROXY_URL;
+const USE_PROXY = process.env.TEST_USE_PROXY === "1";
+if (!USE_PROXY) delete process.env.BL_PROXY_URL;
+const PROXY_URL = USE_PROXY ? String(process.env.BL_PROXY_URL || "").trim() : "";
 
 const { initFirebaseAdmin } = require("./firebaseAdmin");
+const { fetchViaProxy } = require("./httpProxy");
 const { CollectorSession } = require("./session");
 const { writeObservationFromParse } = require("./observationWriter");
 const { resolveMarketFetch } = require("./blUrls");
@@ -44,12 +47,25 @@ function fmtMin(ms) {
   return `${Math.floor(s / 60)} мин ${s % 60} с`;
 }
 
+async function exitIp() {
+  try {
+    const res = PROXY_URL
+      ? await fetchViaProxy("https://api.ipify.org", { proxyUrl: PROXY_URL })
+      : await fetch("https://api.ipify.org");
+    return (await res.text()).trim().slice(0, 64);
+  } catch (e) {
+    return `не узнал (${String(e.message || e).slice(0, 80)})`;
+  }
+}
+
 async function main() {
+  if (USE_PROXY && !PROXY_URL) throw new Error("BL_PROXY_URL пустой");
   const list = readList();
+  const ipBefore = await exitIp();
   const started = Date.now();
   const stats = { total: list.length, withPrice: 0, empty: 0, soft: 0, waf: 0, other: 0, skipped: 0 };
   const failed = [];
-  const session = new CollectorSession({ headless: true, proxyUrl: "" });
+  const session = new CollectorSession({ headless: true, proxyUrl: PROXY_URL });
   let fatal = null;
 
   try {
@@ -111,11 +127,16 @@ async function main() {
   }
 
   const dur = Date.now() - started;
+  const ipAfter = await exitIp();
   const done = stats.withPrice + stats.empty;
   const tried = stats.total - stats.skipped;
   const lines = [
     "🧪 Тестовый прогон ТЕСТ_ПРОКСИ",
-    "⚠️ БЕЗ ПРОКСИ (GitHub Actions, обычный IP GitHub)",
+    USE_PROXY
+      ? "🛡 С ПРОКСИ (GitHub Actions через DataImpulse)"
+      : "⚠️ БЕЗ ПРОКСИ (GitHub Actions, обычный IP GitHub)",
+    `IP в начале: ${ipBefore}`,
+    `IP в конце: ${ipAfter}`,
     "",
     `Наборов в списке: ${stats.total}`,
     `С ценой: ${stats.withPrice}`,
@@ -141,6 +162,8 @@ async function main() {
 
 main().catch(async (e) => {
   console.error(e);
-  await sendTelegram(`🧪 ТЕСТ_ПРОКСИ (без прокси, GitHub) упал до старта: ${String(e.message || e).slice(0, 300)}`);
+  await sendTelegram(
+    `🧪 ТЕСТ_ПРОКСИ (${USE_PROXY ? "с прокси" : "без прокси"}, GitHub) упал до старта: ${String(e.message || e).slice(0, 300)}`
+  );
   process.exit(1);
 });
