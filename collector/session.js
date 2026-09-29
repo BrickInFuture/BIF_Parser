@@ -407,13 +407,21 @@ class CollectorSession {
     await this.context.addInitScript(() => {
       Object.defineProperty(navigator, "webdriver", { get() { return undefined; } });
     });
+    // Proxy traffic is paid per GB; WAF token needs scripts + cookies, not pictures.
+    if (proxy) {
+      await this.context.route("**/*", (route) => {
+        const type = route.request().resourceType();
+        if (type === "image" || type === "media" || type === "font") return route.abort();
+        return route.continue();
+      });
+    }
     this.page = await this.context.newPage();
   }
 
   async warmUp() {
     await this.open();
     if (this.warmed) return;
-    await this.page.goto("https://www.bricklink.com/", {
+    await this.page.goto("https://www.market.com/", {
       waitUntil: "domcontentloaded",
       timeout: this.timeoutMs,
     });
@@ -455,7 +463,7 @@ class CollectorSession {
         "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
       "Accept-Language": "en-US,en;q=0.9",
       "Cache-Control": "no-cache",
-      Referer: "https://www.market.com/",
+      Referer: "https://www.bricklink.com/",
     };
     try {
       const proxy = parseProxyUrl(this.proxyUrl);
