@@ -406,7 +406,8 @@ class CollectorSession {
     });
     await this.context.addInitScript(() => {
       Object.defineProperty(navigator, "webdriver", { get() { return undefined; } });
-    });    this.page = await this.context.newPage();
+    });
+    this.page = await this.context.newPage();
   }
 
   async warmUp() {
