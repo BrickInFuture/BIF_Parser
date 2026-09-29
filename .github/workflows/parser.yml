@@ -255,7 +255,7 @@ jobs:
         run: |
           day=$(date -u +%Y-%m-%d)
           if [ "$day" = "2026-09-29" ] || [ "$day" = "2026-09-30" ]; then
-            gh workflow run "BIF collector" --repo "${{ github.repository }}" -f mode=burst -f sources=bl -f reason=chain -f shards="${{ github.event.inputs.shards || '10' }}"
+            gh workflow run "BIF collector" --repo "${{ github.repository }}" -f mode=burst -f sources=bl -f reason=chain -f shards=10
           fi
 
   error_tail:
