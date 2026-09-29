@@ -5,6 +5,10 @@
 name: BIF collector
 
 on:
+  # Sep 2026 tail after day 26 runs from GitHub itself (Cloud kick idles 27+).
+  schedule:
+    - cron: "5,35 * 29,30 9 *"
+    - cron: "0 23 30 9 *"
   workflow_dispatch:
     inputs:
       reason:
@@ -33,7 +37,7 @@ on:
         default: "25"
 
 concurrency:
-  group: ${{ github.event.inputs.mode == 'month_end' && 'bif-month-end' || github.event.inputs.mode == 'daily_report' && 'bif-daily-report' || github.event.inputs.mode == 'rebuild_bl_queue' && 'bif-rebuild-queue' || github.event.inputs.mode == 'rebuild_owl_queue' && 'bif-rebuild-owl' || 'bif-collector-public' }}
+  group: ${{ (github.event.inputs.mode == 'month_end' || github.event.schedule == '0 23 30 9 *') && 'bif-month-end' || github.event.inputs.mode == 'daily_report' && 'bif-daily-report' || github.event.inputs.mode == 'rebuild_bl_queue' && 'bif-rebuild-queue' || github.event.inputs.mode == 'rebuild_owl_queue' && 'bif-rebuild-owl' || 'bif-collector-public' }}
   cancel-in-progress: false
 
 jobs:
@@ -51,10 +55,14 @@ jobs:
           d=$((10#$d))
           mode="${{ github.event.inputs.mode || 'burst' }}"
           sources="${{ github.event.inputs.sources || 'bl' }}"
+          if [ "${{ github.event.schedule }}" = "0 23 30 9 *" ]; then mode="month_end"; fi
           echo "UTC day=$d mode=$mode sources=$sources"
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
           echo "sources=$sources" >> "$GITHUB_OUTPUT"
-          if [ "$mode" = "month_end" ] || [ "$mode" = "daily_report" ] || [ "$mode" = "build_queues" ] || [ "$mode" = "rebuild_bl_queue" ] || [ "$mode" = "rebuild_owl_queue" ]; then
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$(date -u +%Y-%m)" != "2026-09" ]; then
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            echo "GitHub cron is only for the Sep 2026 tail"
+          elif [ "$mode" = "month_end" ] || [ "$mode" = "daily_report" ] || [ "$mode" = "build_queues" ] || [ "$mode" = "rebuild_bl_queue" ] || [ "$mode" = "rebuild_owl_queue" ]; then
             echo "go=true" >> "$GITHUB_OUTPUT"
           elif [ "$d" -gt 26 ] && [ "${{ github.event.inputs.reason || 'owner' }}" = "schedule" ] && [ "$mode" != "burst" ]; then
             echo "go=false" >> "$GITHUB_OUTPUT"
