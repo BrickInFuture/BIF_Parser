@@ -75,7 +75,19 @@ const PROXY_MAX_ROTATIONS = Math.max(0, Number(process.env.BL_PROXY_MAX_ROTATION
 /** One soft-block is usually the item itself (swapping IP just burns a warm-up); a streak means the IP. */
 const PROXY_ROTATE_AFTER_SOFT = Math.max(1, Number(process.env.BL_PROXY_ROTATE_AFTER_SOFT) || 2);
 
-const WARMUP_URL = String(process.env.BL_WARMUP_URL || "https://www.bricklink.com/").trim();
+/**
+ * Homepage ≈ 5.4 MB (banners, fonts); a Price Guide page ≈ 0.4 MB and still issues the WAF token.
+ * On paid proxy traffic warm on the light page.
+ */
+function warmupUrl(onProxy) {
+  const explicit = String(process.env.BL_WARMUP_URL || "").trim();
+  if (explicit) return explicit;
+  return onProxy
+    ? "https://www.bricklink.com/catalogPG.asp?S=10179-1&ColorID=0"
+    : "https://www.bricklink.com/";
+}
+
+const WAF_TOKEN_WAIT_MS = Math.max(0, Number(process.env.BL_WAF_TOKEN_WAIT_MS) || 10000);
 
 /** Same proxy URL with another sticky port, or null when rotation does not apply. */
 function withRandomProxyPort(raw) {
@@ -438,16 +450,26 @@ class CollectorSession {
     const finished = [];
     const onFinished = (req) => finished.push(req);
     this.page.on("requestfinished", onFinished);
-    await this.page.goto(WARMUP_URL, {
+    const onProxy = Boolean(parseProxyUrl(this.proxyUrl));
+    await this.page.goto(warmupUrl(onProxy), {
       waitUntil: "domcontentloaded",
       timeout: this.timeoutMs,
     });
+    if (onProxy) {
+      // Light page answers 405 + challenge script; token lands a moment later.
+      const deadline = Date.now() + WAF_TOKEN_WAIT_MS;
+      while (Date.now() < deadline) {
+        const cookies = await this.context.cookies().catch(() => []);
+        if (cookies.some((c) => c.name === "aws-waf-token")) break;
+        await sleep(300);
+      }
+    }
     const warmExtra = Math.max(0, Number(process.env.BL_WARMUP_EXTRA_MS || 1000) || 1000);
     await sleep(warmExtra + Math.floor(Math.random() * Math.min(400, warmExtra || 1)));
     this.page.off("requestfinished", onFinished);
     this.warmed = true;
     await this.#syncHttpAuth();
-    if (parseProxyUrl(this.proxyUrl)) {
+    if (onProxy) {
       let bytes = 0;
       for (const req of finished) {
         const sizes = await req.sizes().catch(() => null);
