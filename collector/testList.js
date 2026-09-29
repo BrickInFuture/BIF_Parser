@@ -8,7 +8,7 @@ if (!USE_PROXY) delete process.env.BL_PROXY_URL;
 const PROXY_URL = USE_PROXY ? String(process.env.BL_PROXY_URL || "").trim() : "";
 
 const { initFirebaseAdmin } = require("./firebaseAdmin");
-const { fetchViaProxy, parseProxyUrl } = require("./httpProxy");
+const { parseProxyUrl } = require("./httpProxy");
 const { CollectorSession } = require("./session");
 const { writeObservationFromParse } = require("./observationWriter");
 const { resolveMarketFetch } = require("./blUrls");
@@ -47,12 +47,21 @@ function fmtMin(ms) {
   return `${Math.floor(s / 60)} мин ${s % 60} с`;
 }
 
-async function exitIp() {
+async function directIp() {
   try {
-    const res = PROXY_URL
-      ? await fetchViaProxy("https://api.ipify.org", { proxyUrl: PROXY_URL })
-      : await fetch("https://api.ipify.org");
-    return (await res.text()).trim().slice(0, 64);
+    return (await (await fetch("https://api.ipify.org")).text()).trim().slice(0, 64);
+  } catch {
+    return "";
+  }
+}
+
+async function exitIp(session) {
+  try {
+    if (session?.context?.request) {
+      const res = await session.context.request.get("https://api.ipify.org", { timeout: 30000 });
+      return (await res.text()).trim().slice(0, 64);
+    }
+    return await directIp();
   } catch (e) {
     return `не узнал (${String(e.message || e).slice(0, 80)})`;
   }
@@ -65,16 +74,9 @@ async function main() {
     throw new Error(`строка прокси не разбирается (${shape})`);
   }
   const list = readList();
-  const ipBefore = await exitIp();
-  if (USE_PROXY) {
-    let directIp = "";
-    try {
-      directIp = (await (await fetch("https://api.ipify.org")).text()).trim();
-    } catch {}
-    if (!ipBefore || ipBefore.startsWith("не узнал") || ipBefore === directIp) {
-      throw new Error(`прокси не включился: IP через прокси ${ipBefore || "?"}, IP GitHub ${directIp || "?"}`);
-    }
-  }
+  const githubIp = await directIp();
+  let ipBefore = "";
+  let ipAfter = "";
   const started = Date.now();
   const stats = { total: list.length, withPrice: 0, empty: 0, soft: 0, waf: 0, other: 0, skipped: 0 };
   const failed = [];
@@ -83,6 +85,10 @@ async function main() {
 
   try {
     await session.warmUp();
+    ipBefore = await exitIp(session);
+    if (USE_PROXY && (!ipBefore || ipBefore.startsWith("не узнал") || ipBefore === githubIp)) {
+      throw new Error(`прокси не включился: IP через прокси ${ipBefore || "?"}, IP GitHub ${githubIp || "?"}`);
+    }
     for (let i = 0; i < list.length; i++) {
       const setNo = list[i];
       const snap = await db.collection("catalog_items").doc(`SET_${setNo}`).get();
@@ -136,11 +142,11 @@ async function main() {
     fatal = e;
     console.error(e);
   } finally {
+    ipAfter = await exitIp(session);
     await session.close().catch(() => {});
   }
 
   const dur = Date.now() - started;
-  const ipAfter = await exitIp();
   const done = stats.withPrice + stats.empty;
   const tried = stats.total - stats.skipped;
   const lines = [
@@ -148,8 +154,9 @@ async function main() {
     USE_PROXY
       ? "🛡 С ПРОКСИ (GitHub Actions через DataImpulse)"
       : "⚠️ БЕЗ ПРОКСИ (GitHub Actions, обычный IP GitHub)",
-    `IP в начале: ${ipBefore}`,
-    `IP в конце: ${ipAfter}`,
+    `IP GitHub: ${githubIp || "?"}`,
+    `IP в начале: ${ipBefore || "?"}`,
+    `IP в конце: ${ipAfter || "?"}`,
     "",
     `Наборов в списке: ${stats.total}`,
     `С ценой: ${stats.withPrice}`,
