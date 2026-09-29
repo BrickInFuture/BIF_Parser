@@ -1889,6 +1889,8 @@ async function main() {
     avgSecSoft,
     circuitTrips: session.circuitTrips || 0,
     proxyRotations: session.proxyRotations || 0,
+    proxyWarmups: session.warmups || 0,
+    proxyTrafficMb: typeof session.proxyTrafficMb === "function" ? session.proxyTrafficMb() : 0,
     circuitOpen: session.isCircuitOpen(),
     circuitOpenThisWindow,
     skipBaseKey,

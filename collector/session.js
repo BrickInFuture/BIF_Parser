@@ -9,6 +9,7 @@
 "use strict";
 
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const { chromium } = require("playwright");
 const {
@@ -70,6 +71,11 @@ function proxyPortRange() {
 
 /** Max IP swaps per window; past it soft-blocks fall back to cool/circuit. */
 const PROXY_MAX_ROTATIONS = Math.max(0, Number(process.env.BL_PROXY_MAX_ROTATIONS ?? 40) || 0);
+
+/** One soft-block is usually the item itself (swapping IP just burns a warm-up); a streak means the IP. */
+const PROXY_ROTATE_AFTER_SOFT = Math.max(1, Number(process.env.BL_PROXY_ROTATE_AFTER_SOFT) || 2);
+
+const WARMUP_URL = String(process.env.BL_WARMUP_URL || "https://www.bricklink.com/").trim();
 
 /** Same proxy URL with another sticky port, or null when rotation does not apply. */
 function withRandomProxyPort(raw) {
@@ -355,6 +361,11 @@ class CollectorSession {
     this.circuitOpen = false;
     this.circuitTrips = 0;
     this.proxyRotations = 0;
+    this.profileDir = path.join(os.tmpdir(), `bif-bl-profile-${process.pid}`);
+    this.warmups = 0;
+    this.warmBytes = 0;
+    /** Decoded page size (upper bound of wire bytes; gzip makes the real hop smaller). */
+    this.pageBytes = 0;
     /** Last soft-block was answered with a fresh proxy IP (streak counters are moot). */
     this.lastSoftRotated = false;
     /** When true, ingest loops should stop the time window instead of waiting out circuit cool. */
@@ -396,31 +407,63 @@ class CollectorSession {
       );
     }
 
-    this.browser = await chromium.launch(launchOpts);
-    this.context = await this.browser.newContext({
+    const contextOpts = {
       userAgent: DEFAULT_USER_AGENT,
       locale: "en-US",
       viewport: { width: 1365, height: 900 },
       timezoneId: "UTC",
       extraHTTPHeaders: { "Accept-Language": "en-US,en;q=0.9" },
-    });
+    };
+    if (proxy) {
+      // Disk profile outlives IP swaps: re-warm pays for the page, not every script/style again.
+      this.browser = null;
+      this.context = await chromium.launchPersistentContext(this.profileDir, {
+        ...launchOpts,
+        ...contextOpts,
+      });
+      await this.context.clearCookies();
+    } else {
+      this.browser = await chromium.launch(launchOpts);
+      this.context = await this.browser.newContext(contextOpts);
+    }
     await this.context.addInitScript(() => {
       Object.defineProperty(navigator, "webdriver", { get() { return undefined; } });
     });
-    this.page = await this.context.newPage();
+    this.page = this.context.pages()[0] || (await this.context.newPage());
   }
 
   async warmUp() {
     await this.open();
     if (this.warmed) return;
-    await this.page.goto("https://www.bricklink.com/", {
+    const finished = [];
+    const onFinished = (req) => finished.push(req);
+    this.page.on("requestfinished", onFinished);
+    await this.page.goto(WARMUP_URL, {
       waitUntil: "domcontentloaded",
       timeout: this.timeoutMs,
     });
     const warmExtra = Math.max(0, Number(process.env.BL_WARMUP_EXTRA_MS || 1000) || 1000);
     await sleep(warmExtra + Math.floor(Math.random() * Math.min(400, warmExtra || 1)));
+    this.page.off("requestfinished", onFinished);
     this.warmed = true;
     await this.#syncHttpAuth();
+    if (parseProxyUrl(this.proxyUrl)) {
+      let bytes = 0;
+      for (const req of finished) {
+        const sizes = await req.sizes().catch(() => null);
+        if (sizes) bytes += (sizes.responseBodySize || 0) + (sizes.responseHeadersSize || 0);
+      }
+      this.warmups += 1;
+      this.warmBytes += bytes;
+      console.log(
+        JSON.stringify({ step: "warm_bytes", kb: Math.round(bytes / 1024), requests: finished.length })
+      );
+    }
+  }
+
+  /** Proxy traffic this session (MB): warm-ups + Price Guide pages. */
+  proxyTrafficMb() {
+    return Math.round(((this.warmBytes + this.pageBytes) / (1024 * 1024)) * 10) / 10;
   }
 
   async #syncHttpAuth() {
@@ -468,6 +511,7 @@ class CollectorSession {
         });
         status = res.status();
         html = await res.text();
+        this.pageBytes += html.length;
       } else {
         headers.Cookie = this.httpCookieHeader || "";
         const res = await fetchViaProxy(url, {
@@ -628,13 +672,22 @@ class CollectorSession {
     this.consecutiveFails += 1;
 
     if (meta.softBlocked) {
-      const rotateMs = await this.#rotateProxyAfterSoft();
-      if (rotateMs) {
-        this.lastSoftRotated = true;
-        this.consecutiveSoftBlocks = 0;
-        return rotateMs;
-      }
       this.consecutiveSoftBlocks += 1;
+      const canRotate =
+        this.proxyRotations < PROXY_MAX_ROTATIONS && withRandomProxyPort(this.proxyUrl) != null;
+      if (canRotate && this.consecutiveSoftBlocks >= PROXY_ROTATE_AFTER_SOFT) {
+        const rotateMs = await this.#rotateProxyAfterSoft();
+        if (rotateMs) {
+          this.lastSoftRotated = true;
+          this.consecutiveSoftBlocks = 0;
+          return rotateMs;
+        }
+      } else if (canRotate) {
+        // Fresh IP is one soft away; a long cool here would only waste window time.
+        const ms = randomInRange(2000, 4000);
+        await sleep(ms);
+        return ms;
+      }
       // Всегда чуть остыть после soft — иначе бьём IP с паузой 1–2с и ловим волну.
       const softCoolMs = await this.#softBlockCool();
       if (this.consecutiveSoftBlocks >= CIRCUIT_SOFT_LIMIT) {
@@ -960,6 +1013,7 @@ class CollectorSession {
   async close() {
     try {
       if (this.browser) await this.browser.close();
+      else if (this.context) await this.context.close();
     } catch {
       //
     }

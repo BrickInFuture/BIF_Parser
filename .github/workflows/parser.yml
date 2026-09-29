@@ -22,7 +22,7 @@ on:
       limit:
         description: "BL items per burst"
         required: false
-        default: "60"
+        default: "150"
       owlLimit:
         description: "Owl items per burst (soft default 30)"
         required: false
@@ -30,7 +30,7 @@ on:
       maxMinutes:
         description: "BL burst max minutes"
         required: false
-        default: "20"
+        default: "25"
 
 concurrency:
   group: ${{ github.event.inputs.mode == 'month_end' && 'bif-month-end' || github.event.inputs.mode == 'daily_report' && 'bif-daily-report' || github.event.inputs.mode == 'rebuild_bl_queue' && 'bif-rebuild-queue' || github.event.inputs.mode == 'rebuild_owl_queue' && 'bif-rebuild-owl' || 'bif-collector-public' }}
@@ -196,8 +196,8 @@ jobs:
       - name: BrickLink burst
         if: needs.gate.outputs.sources == 'bl' || needs.gate.outputs.sources == 'both' || needs.gate.outputs.sources == ''
         env:
-          LIMIT: ${{ github.event.inputs.limit || '60' }}
-          MAX_MINUTES: ${{ github.event.inputs.maxMinutes || '20' }}
+          LIMIT: ${{ github.event.inputs.limit || '150' }}
+          MAX_MINUTES: ${{ github.event.inputs.maxMinutes || '25' }}
         run: npm run ingest:catalog -- --confirm --phase=primary --limit="$LIMIT" --maxMinutes="$MAX_MINUTES"
       - name: Brick Owl burst
         if: needs.gate.outputs.sources == 'owl' || needs.gate.outputs.sources == 'both'
