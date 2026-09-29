@@ -56,9 +56,9 @@ jobs:
           echo "sources=$sources" >> "$GITHUB_OUTPUT"
           if [ "$mode" = "month_end" ] || [ "$mode" = "daily_report" ] || [ "$mode" = "build_queues" ] || [ "$mode" = "rebuild_bl_queue" ] || [ "$mode" = "rebuild_owl_queue" ]; then
             echo "go=true" >> "$GITHUB_OUTPUT"
-          elif [ "$d" -gt 26 ] && [ "${{ github.event.inputs.reason || 'owner' }}" = "schedule" ]; then
+          elif [ "$d" -gt 26 ] && [ "${{ github.event.inputs.reason || 'owner' }}" = "schedule" ] && [ "$mode" != "burst" ]; then
             echo "go=false" >> "$GITHUB_OUTPUT"
-            echo "Schedule idle after day 26"
+            echo "Schedule after day 26: queue bursts only"
           else
             echo "go=true" >> "$GITHUB_OUTPUT"
           fi
