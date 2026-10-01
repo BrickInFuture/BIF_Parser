@@ -1,5 +1,5 @@
 # Internal collector — raw market observations only.
-# Kick BL every 30 min (sources=bl). Soft Owl kick every 2h (sources=owl) — separate window.
+# Kick every 30 min: BL burst (sources=bl) and Owl burst (sources=owl), same scheme, own concurrency groups.
 # Secondary writes lastClosed month, not current UTC month. No per-burst Telegram.
 
 name: BIF collector
@@ -28,20 +28,20 @@ on:
         required: false
         default: "400"
       shards:
-        description: "Parallel BL bursts, each on its own proxy port slice (1-10)"
+        description: "Parallel bursts (1-10); BL shards get their own proxy port slice"
         required: false
         default: "10"
       owlLimit:
-        description: "Owl items per burst (soft default 30)"
+        description: "Owl items per burst (per shard)"
         required: false
-        default: "30"
+        default: "200"
       maxMinutes:
-        description: "BL burst max minutes"
+        description: "Burst max minutes"
         required: false
         default: "28"
 
 concurrency:
-  group: ${{ (github.event.inputs.mode == 'month_end' || github.event.schedule == '0 23 30 9 *') && 'bif-month-end' || github.event.inputs.mode == 'daily_report' && 'bif-daily-report' || github.event.inputs.mode == 'rebuild_bl_queue' && 'bif-rebuild-queue' || github.event.inputs.mode == 'rebuild_owl_queue' && 'bif-rebuild-owl' || 'bif-collector-public' }}
+  group: ${{ (github.event.inputs.mode == 'month_end' || github.event.schedule == '0 23 30 9 *') && 'bif-month-end' || github.event.inputs.mode == 'daily_report' && 'bif-daily-report' || github.event.inputs.mode == 'rebuild_bl_queue' && 'bif-rebuild-queue' || github.event.inputs.mode == 'rebuild_owl_queue' && 'bif-rebuild-owl' || github.event.inputs.sources == 'owl' && 'bif-collector-owl' || 'bif-collector-public' }}
   cancel-in-progress: false
 
 jobs:
@@ -62,7 +62,7 @@ jobs:
           sources="${{ github.event.inputs.sources || 'bl' }}"
           n="${{ github.event.inputs.shards || '10' }}"
           n=$((10#$n))
-          if [ "$sources" != "bl" ] || [ "$n" -lt 1 ]; then n=1; fi
+          if [ "$sources" = "both" ] || [ "$n" -lt 1 ]; then n=1; fi
           if [ "$n" -gt 10 ]; then n=10; fi
           if [ "${{ github.event.schedule }}" = "0 23 30 9 *" ]; then mode="month_end"; fi
           echo "UTC day=$d mode=$mode sources=$sources shards=$n"
@@ -192,8 +192,9 @@ jobs:
       BL_HTTP_429_MIN_MS: "15000"
       BL_HTTP_429_MAX_MS: "30000"
       BO_PAUSE_MS: "5000,9000"
-      BO_CIRCUIT_FAILS: "3"
-      BO_HOT_UNTIL_MS: "5400000"
+      BO_CIRCUIT_FAILS: "4"
+      BO_HOT_UNTIL_MS: "1800000"
+      BO_USE_PROXY: "0"
       BL_PROXY_URL: ${{ secrets.BL_PROXY_URL }}
     steps:
       - uses: actions/checkout@v4
@@ -234,8 +235,9 @@ jobs:
         if: needs.gate.outputs.sources == 'owl' || needs.gate.outputs.sources == 'both'
         continue-on-error: true
         env:
-          BO_LIMIT: ${{ github.event.inputs.owlLimit || '30' }}
-        run: npm run ingest:owl -- --confirm --limit="${{ github.event.inputs.owlLimit || '30' }}" --maxMinutes=20
+          BO_LIMIT: ${{ github.event.inputs.owlLimit || '200' }}
+          MAX_MINUTES: ${{ github.event.inputs.maxMinutes || '25' }}
+        run: npm run ingest:owl -- --confirm --limit="$BO_LIMIT" --maxMinutes="$MAX_MINUTES"
       - name: User refresh queue
         if: success() && matrix.shard == 1 && (needs.gate.outputs.sources == 'bl' || needs.gate.outputs.sources == 'both' || needs.gate.outputs.sources == '')
         continue-on-error: true

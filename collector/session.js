@@ -23,7 +23,12 @@ const {
   looksSoftBlockShell,
 } = require("./parseHtml");
 const { marketCatalogPgUrl, normalizeItemNumber } = require("./blUrls");
-const { parseProxyUrl: parseProxyUrlShared, fetchViaProxy } = require("./httpProxy");
+const {
+  parseProxyUrl: parseProxyUrlShared,
+  fetchViaProxy,
+  withRandomProxyPort,
+  startPortInOwnRange,
+} = require("./httpProxy");
 
 const DEFAULT_TIMEOUT_MS = Number(process.env.BL_PARSE_TIMEOUT_MS || 90000) || 90000;
 const DEFAULT_USER_AGENT =
@@ -60,15 +65,6 @@ function circuitCoolRange() {
   ];
 }
 
-/** Sticky gateway: each port in this range holds its own residential IP. */
-function proxyPortRange() {
-  const m = String(process.env.BL_PROXY_PORT_RANGE || "10000-20000").match(/^\s*(\d+)\s*-\s*(\d+)\s*$/);
-  if (!m) return null;
-  const lo = Number(m[1]);
-  const hi = Number(m[2]);
-  return hi > lo ? [lo, hi] : null;
-}
-
 /** Max IP swaps per window; past it soft-blocks fall back to cool/circuit. */
 const PROXY_MAX_ROTATIONS = Math.max(0, Number(process.env.BL_PROXY_MAX_ROTATIONS ?? 40) || 0);
 
@@ -91,36 +87,6 @@ function warmupUrl(onProxy) {
 }
 
 const WAF_TOKEN_WAIT_MS = Math.max(0, Number(process.env.BL_WAF_TOKEN_WAIT_MS) || 10000);
-
-/** Same proxy URL with another sticky port, or null when rotation does not apply. */
-function withRandomProxyPort(raw) {
-  if (process.env.BL_PROXY_ROTATE === "0") return null;
-  const range = proxyPortRange();
-  const src = String(raw || "").trim();
-  const m = src.match(/:(\d{2,5})(\/?)$/);
-  if (!range || !m) return null;
-  const port = Number(m[1]);
-  if (port < range[0] || port > range[1]) return null;
-  let next = port;
-  while (next === port) next = range[0] + Math.floor(Math.random() * (range[1] - range[0] + 1));
-  return `${src.slice(0, m.index)}:${next}${m[2]}`;
-}
-
-/**
- * Parallel bursts get their own BL_PROXY_PORT_RANGE slice: start on a random port inside it,
- * otherwise every shard begins on the secret's port and rotation refuses an out-of-range port.
- */
-function startPortInOwnRange(raw) {
-  const src = String(raw || "").trim();
-  if (!String(process.env.BL_PROXY_PORT_RANGE || "").trim() || process.env.BL_PROXY_ROTATE === "0") {
-    return src;
-  }
-  const range = proxyPortRange();
-  const m = src.match(/:(\d{2,5})(\/?)$/);
-  if (!range || !m) return src;
-  const port = range[0] + Math.floor(Math.random() * (range[1] - range[0] + 1));
-  return `${src.slice(0, m.index)}:${port}${m[2]}`;
-}
 
 /** When true, circuit cools then continues; when false, stopRequested kills the window. */
 function circuitCoolAndContinue() {
