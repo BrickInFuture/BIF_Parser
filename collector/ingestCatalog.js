@@ -112,6 +112,8 @@ const NO_BIF = hasFlag("no-bif");
 const RESET_RUN = hasFlag("reset-run");
 const LIMIT = Math.max(1, Number(flagValue("limit", "500")) || 500);
 const MAX_MINUTES = Math.max(1, Number(flagValue("maxMinutes", "180")) || 180);
+// Брать из месячной очереди маленькими кусками: взятое, но не снятое до конца окна, иначе теряется.
+const MONTH_QUEUE_TAKE = Math.max(10, Number(process.env.BL_MONTH_QUEUE_TAKE) || 100);
 const SHARD_COUNT = Math.max(1, Number(flagValue("shardCount", "1")) || 1);
 const SHARD_INDEX = Math.min(
   SHARD_COUNT - 1,
@@ -1162,7 +1164,7 @@ async function main() {
     let initialGapItems = [];
     if (MONTH_QUEUE && QUEUE_MODE !== "cursor") {
       await session.warmUp();
-      initialGapItems = await buildMonthQueuePendingItems(LIMIT);
+      initialGapItems = await buildMonthQueuePendingItems(Math.min(LIMIT, MONTH_QUEUE_TAKE));
     } else {
       const [, gapItems] = await Promise.all([
         session.warmUp(),
@@ -1307,7 +1309,7 @@ async function main() {
       if (remaining <= 0 || Date.now() >= deadlineMs) return false;
 
       if (MONTH_QUEUE) {
-        const refill = await buildMonthQueuePendingItems(remaining);
+        const refill = await buildMonthQueuePendingItems(Math.min(remaining, MONTH_QUEUE_TAKE));
         if (!refill.length) return false;
         pendingItems.push(...refill);
         gapRefills += 1;
@@ -1417,9 +1419,9 @@ async function main() {
         if (!pendingItems.length) continue;
       }
 
+      if (stopWindow || chunkDone >= LIMIT || Date.now() >= deadlineMs) break;
       const item = pendingItems.shift();
       const { cat, source } = item;
-      if (stopWindow || chunkDone >= LIMIT || Date.now() >= deadlineMs) break;
 
       if (source === "cursor") {
         cursorCatalogId = cat.catalogItemId;
@@ -1792,6 +1794,8 @@ async function main() {
   } finally {
     await session.close();
   }
+
+  await requeuePendingAsErrors("window_end");
 
   const timedOut = Date.now() >= deadlineMs && !exhausted;
   const status = exhausted ? "done" : "running";
