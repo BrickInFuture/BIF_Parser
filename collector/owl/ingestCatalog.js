@@ -111,15 +111,8 @@ async function main() {
     })
   );
 
-  await ensureMonthQueue(db, admin, {
-    periodId: queuePeriodId,
-    source: "brickowl",
-    checkMonthId: writePeriodId,
-    types: PRIMARY_TYPES,
-    mapCatalogDoc: mapCatalogDocLite,
-    FieldValue,
-    rebuild: false,
-  });
+  // Залп очередь не строит: только rebuild_owl_queue / build_queues.
+  await ensureMonthQueue(db, admin, { periodId: queuePeriodId, source: "brickowl" });
 
   const mainBudget = Math.max(0, LIMIT - ERROR_BUDGET);
   const taken = await takeFromMonthQueue(db, admin, {

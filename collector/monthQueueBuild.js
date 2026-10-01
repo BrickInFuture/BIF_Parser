@@ -139,6 +139,7 @@ async function main() {
       FieldValue,
       dryRun,
     });
+    if (r && r.locked) continue;
     if (source === "bricklink" && r && r.eligible != null) blEligible = Number(r.eligible) || 0;
     const meta = dryRun ? null : await readMonthQueueMeta(db, periodId, source);
     console.log(

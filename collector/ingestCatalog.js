@@ -77,7 +77,6 @@ const {
   clearMonthQueueError,
   loadCatalogDocsByIds,
   readMonthQueueMeta,
-  buildMonthQueue,
 } = require("./monthQueue");
 const { writeIngestArtifact } = require("./ingestReportArtifacts");
 const { markCollectorHot, bumpDayPace } = require("./collectorGate");
@@ -590,30 +589,8 @@ async function main() {
    */
   async function buildMonthQueuePendingItems(wantLimit) {
     const limit = Math.max(1, Number(wantLimit) || LIMIT);
-    await ensureMonthQueue(db, admin, {
-      periodId,
-      types: activeTypes,
-      mapCatalogDoc,
-      FieldValue,
-      rebuild: false,
-    });
-
-    let meta = await readMonthQueueMeta(db, periodId);
-    const utcDay = new Date().toISOString().slice(0, 10);
-    if (
-      meta &&
-      Number(meta.remaining) === 0 &&
-      String(meta.lastRebuildUtcDay || "") !== utcDay
-    ) {
-      console.log(JSON.stringify({ step: "month_queue_daily_rebuild", periodId, utcDay }));
-      await buildMonthQueue(db, admin, {
-        periodId,
-        types: activeTypes,
-        mapCatalogDoc,
-        FieldValue,
-      });
-      meta = await readMonthQueueMeta(db, periodId);
-    }
+    // Залп очередь не строит и не пересобирает: это только задание rebuild_bl_queue / build_queues.
+    const { meta } = await ensureMonthQueue(db, admin, { periodId, source: "bricklink" });
 
     // До ~45% пачки — due soft/defer (раньше потолок 20% резал ERROR_BUDGET=12 при limit=60).
     const errBudget = Math.min(

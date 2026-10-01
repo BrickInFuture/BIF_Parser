@@ -57,22 +57,63 @@ function softRetryMs(errorTag, error) {
  * @param {string} [source] market | brickowl
  * @param {string} [monthDocId] id monthly-дока (по умолчанию periodId очереди)
  */
+function monthlyRef(db, catalogItemId, source, monthId) {
+  return db
+    .collection("market_observations")
+    .doc(observationDocId(catalogItemId, source))
+    .collection("monthly")
+    .doc(monthId);
+}
+
+function monthlySnapNeedsScrape(snap) {
+  if (!snap || !snap.exists) return true;
+  const st = String((snap.data() || {}).status || "");
+  return st !== "ok" && st !== "no_data";
+}
+
 async function needsCurrentMonth(db, catalogItemId, periodId, source = "bricklink", monthDocId = null) {
   const src = String(source || "bricklink").toLowerCase() === "brickowl" ? "brickowl" : "bricklink";
-  const monthId = monthDocId || periodId;
-  const obsId = observationDocId(catalogItemId, src);
-  const snap = await db
-    .collection("market_observations")
-    .doc(obsId)
-    .collection("monthly")
-    .doc(monthId)
-    .get();
-  if (!snap.exists) return true;
-  const d = snap.data() || {};
-  const st = String(d.status || "");
-  if (st === "error" || st === "fail") return true;
-  if (st === "ok" || st === "no_data") return false;
-  return true;
+  const snap = await monthlyRef(db, catalogItemId, src, monthDocId || periodId).get();
+  return monthlySnapNeedsScrape(snap);
+}
+
+/** Сборка без метки дольше этого считается умершей (задание убили). */
+const BUILD_STALE_MS = Math.max(
+  60_000,
+  Number(process.env.BL_MONTH_QUEUE_BUILD_STALE_MS) || 15 * 60 * 1000
+);
+const BUILD_HEARTBEAT_EVERY = 1000;
+
+function tsMillis(v) {
+  if (!v) return 0;
+  if (typeof v.toMillis === "function") return v.toMillis();
+  return Number(v) || 0;
+}
+
+/** Кто-то живой собирает очередь прямо сейчас (свежая метка сборки). */
+function buildLockHeld(meta, nowMs = Date.now()) {
+  if (!meta || String(meta.status) !== "building") return false;
+  const hb = tsMillis(meta.buildHeartbeatAt);
+  return hb > 0 && nowMs - hb < BUILD_STALE_MS;
+}
+
+async function acquireBuildLock(db, ref, fields, FieldValue) {
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (buildLockHeld(snap.exists ? snap.data() : null)) return false;
+    tx.set(
+      ref,
+      {
+        ...fields,
+        status: "building",
+        buildStartedAt: FieldValue.serverTimestamp(),
+        buildHeartbeatAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+    return true;
+  });
 }
 
 /**
@@ -96,22 +137,18 @@ async function buildMonthQueue(db, admin, opts = {}) {
   const ref = queueRef(db, periodId, source);
 
   if (!dryRun) {
-    await ref.set(
-      {
-        periodId,
-        source,
-        checkMonthId,
-        status: "building",
-        updatedAt: FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
+    const got = await acquireBuildLock(db, ref, { periodId, source, checkMonthId }, FieldValue);
+    if (!got) {
+      console.log(JSON.stringify({ step: "month_queue_build_locked", periodId, source }));
+      return { locked: true, source, total: null, chunkCount: null, scanned: 0, eligible: null, needReads: 0 };
+    }
   }
 
   const scored = [];
   let scanned = 0;
   let eligible = 0;
   let needReads = 0;
+  let heartbeats = 0;
 
   for (const itemType of types) {
     let lastId = null;
@@ -125,6 +162,7 @@ async function buildMonthQueue(db, admin, opts = {}) {
       const snap = await q.get();
       if (snap.empty) break;
 
+      const candidates = [];
       for (const doc of snap.docs) {
         scanned += 1;
         const cat = mapCatalogDoc(doc);
@@ -134,17 +172,28 @@ async function buildMonthQueue(db, admin, opts = {}) {
         const classif = classifyCoverage(cat, nowMs);
         if (classif.cohort === "too_early") continue;
         eligible += 1;
+        candidates.push({ doc, cat, classif });
+      }
 
-        needReads += 1;
-        const needs = await needsCurrentMonth(db, doc.id, periodId, source, checkMonthId);
-        if (!needs) continue;
+      const monthlySnaps = candidates.length
+        ? await db.getAll(...candidates.map((c) => monthlyRef(db, c.doc.id, source, checkMonthId)))
+        : [];
+      needReads += candidates.length;
 
+      for (let i = 0; i < candidates.length; i += 1) {
+        if (!monthlySnapNeedsScrape(monthlySnaps[i])) continue;
+        const { doc, cat, classif } = candidates[i];
         const coverage = { skip: false, reason: "month_queue_need", cohort: classif.cohort };
         let score = scoreCatalogPriority(cat, coverage);
         score += 5000; // все здесь — «нужен текущий месяц»
         score += typePriorityRank(cat.itemType) * -10;
         score += catalogReleaseYear(cat);
         scored.push({ id: doc.id, score, itemType: cat.itemType });
+      }
+
+      if (!dryRun && Math.floor(scanned / BUILD_HEARTBEAT_EVERY) > heartbeats) {
+        heartbeats = Math.floor(scanned / BUILD_HEARTBEAT_EVERY);
+        await ref.set({ buildHeartbeatAt: FieldValue.serverTimestamp() }, { merge: true });
       }
 
       lastId = snap.docs[snap.docs.length - 1].id;
@@ -235,60 +284,31 @@ async function readMonthQueueMeta(db, periodId, source = "bricklink") {
 }
 
 /**
- * Собрать очередь, если нет / статус не ready / --rebuild.
+ * Готовая очередь на месяц. Без allowBuild ничего не строит и не ждёт:
+ * строят только задания build_queues / rebuild_*_queue (monthQueueBuild.js).
  */
 async function ensureMonthQueue(db, admin, opts = {}) {
   const periodId = opts.periodId || utcYearMonth();
   const source =
     String(opts.source || "bricklink").toLowerCase() === "brickowl" ? "brickowl" : "bricklink";
-  let force = opts.rebuild === true;
+  const force = opts.rebuild === true;
   const meta = await readMonthQueueMeta(db, periodId, source);
-  // Застрявший building (>90 мин) — пересобрать, иначе залпы вечно exhausted.
-  if (!force && meta && String(meta.status) === "building") {
-    const updatedMs =
-      meta.updatedAt && typeof meta.updatedAt.toMillis === "function"
-        ? meta.updatedAt.toMillis()
-        : 0;
-    if (updatedMs > 0 && Date.now() - updatedMs > 90 * 60 * 1000) {
-      console.log(
-        JSON.stringify({
-          step: "month_queue_stale_building",
-          source,
-          ageMin: Math.round((Date.now() - updatedMs) / 60000),
-        })
-      );
-      force = true;
-    }
-  }
-  if (!force && meta && String(meta.status) === "ready" && Number(meta.chunkCount) >= 0) {
-    return { built: false, meta };
-  }
-  // Другой процесс уже собирает (локальный build / параллельный залп) — ждём ready,
-  // не стартуем второй полный обход каталога (дорого и ломает чанки).
-  if (!force && meta && String(meta.status) === "building") {
-    const waitMs = Math.max(30_000, Number(opts.buildWaitMs) || 20 * 60 * 1000);
-    const step = 15_000;
-    const started = Date.now();
-    while (Date.now() - started < waitMs) {
-      await new Promise((r) => setTimeout(r, step));
-      const again = await readMonthQueueMeta(db, periodId, source);
-      if (again && String(again.status) === "ready") {
-        console.log(
-          JSON.stringify({
-            step: "month_queue_wait_ready",
-            source,
-            waitedSec: Math.round((Date.now() - started) / 1000),
-            total: again.total,
-          })
-        );
-        return { built: false, meta: again, waited: true };
-      }
-      if (!again || String(again.status) !== "building") break;
-    }
+  const ready = meta && String(meta.status) === "ready" && Number(meta.chunkCount) >= 0;
+  if (!force && ready) return { built: false, meta };
+  if (opts.allowBuild !== true) {
+    console.log(
+      JSON.stringify({
+        step: "month_queue_not_ready",
+        source,
+        periodId,
+        status: meta ? String(meta.status || "") : null,
+      })
+    );
+    return { built: false, meta: null, notReady: true };
   }
   const r = await buildMonthQueue(db, admin, { ...opts, source });
   const fresh = await readMonthQueueMeta(db, periodId, source);
-  return { built: true, meta: fresh, build: r };
+  return { built: !r.locked, meta: fresh, build: r };
 }
 
 /**
@@ -501,4 +521,6 @@ module.exports = {
   loadCatalogDocsByIds,
   needsCurrentMonth,
   softRetryMs,
+  buildLockHeld,
+  BUILD_STALE_MS,
 };
